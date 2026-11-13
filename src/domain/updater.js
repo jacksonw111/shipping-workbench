@@ -103,18 +103,42 @@ export class Updater {
     return `https://codeload.github.com/${owner}/${repo}/tar.gz/refs/heads/${branch}`;
   }
 
+  /**
+   * 读远端 package.json。
+   *
+   * 优先走 GitHub API:raw.githubusercontent 是 CDN,刚推完的几分钟里仍返回旧内容,
+   * 会让「检查更新」误报「已是最新」。API 拿不到(限流/离线)再退回 raw。
+   */
+  async remoteManifest({ timeoutMs = 8000 } = {}) {
+    const { owner, repo, branch } = this.source;
+    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/package.json?ref=${encodeURIComponent(branch)}`;
+    const api = await this.fetchImpl(apiUrl, {
+      headers: { accept: 'application/vnd.github.raw', 'user-agent': 'shipping-workbench-updater' },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    }).catch((error) => ({ ok: false, status: 0, error }));
+    if (api.ok) {
+      const text = await api.text();
+      const manifest = JSON.parse(text);
+      if (manifest?.version) return manifest;
+    }
+    const raw = await this.fetchImpl(`${this.rawBase}/package.json`, {
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!raw.ok) throw new Error(`GitHub 返回 HTTP ${raw.status || api.status}`);
+    const manifest = await raw.json();
+    if (!manifest?.version) throw new Error('远端 package.json 没有 version');
+    return manifest;
+  }
+
   /** 只查远端 package.json 的版本,不下载整包。 */
   async check({ timeoutMs = 8000 } = {}) {
     const current = this.currentVersion;
     try {
-      const response = await this.fetchImpl(`${this.rawBase}/package.json`, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      if (!response.ok) throw new Error(`GitHub 返回 HTTP ${response.status}`);
-      const remote = await response.json();
-      const latest = String(remote?.version ?? '').trim();
-      if (!latest) throw new Error('远端 package.json 没有 version');
+      const remote = await this.remoteManifest({ timeoutMs });
+      const latest = String(remote.version ?? '').trim();
       return {
         current,
         latest,

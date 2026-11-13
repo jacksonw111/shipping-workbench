@@ -49,21 +49,21 @@ test('检查更新:只读远端 package.json', async () => {
     home: tempDir('swb-home-'),
     fetchImpl: async (url) => {
       calls.push(url);
-      return { ok: true, json: async () => ({ version: '0.11.0' }) };
+      return { ok: true, text: async () => JSON.stringify({ version: '0.11.0' }) };
     },
   });
   const info = await updater.check();
   assert.equal(info.current, '0.10.0');
   assert.equal(info.latest, '0.11.0');
   assert.equal(info.hasUpdate, true);
-  assert.match(calls[0], /raw\.githubusercontent\.com\/jacksonw111\/shipping-workbench\/main\/package\.json$/);
+  assert.match(calls[0], /api\.github\.com\/repos\/jacksonw111\/shipping-workbench\/contents\/package\.json\?ref=main$/);
 });
 
 test('检查更新失败时如实返回原因,不抛', async () => {
   const updater = new Updater({
     appDir: makeInstall(),
     home: tempDir('swb-home-'),
-    fetchImpl: async () => ({ ok: false, status: 404 }),
+    fetchImpl: async () => ({ ok: false, status: 404, text: async () => '', json: async () => ({}) }),
   });
   const info = await updater.check();
   assert.equal(info.hasUpdate, false);
