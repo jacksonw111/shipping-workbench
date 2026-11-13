@@ -19,7 +19,7 @@
 **方式一(推荐,DSH 插件管理器)**:设置 → 插件 → 安装
 
 ```
-github:jacksonw111/shipping-workbench
+github:<你的账号>/shipping-workbench
 ```
 
 **方式二(本地)**:终端里执行
@@ -36,6 +36,31 @@ cd 这个目录
 卸载:执行 `./uninstall.sh`;数据目录 `~/.dsh/shipping-workbench/` 不会被删。
 
 > 自己重新打包需要 Node 20+;运行时不需要,依赖已经打进 `lib/index.js`。
+
+## 跟随更新
+
+插件装进 profile 的是一份**副本**,不跟 git;更新分两层:
+
+| 改了什么 | 生效方式 |
+|---|---|
+| 只改了 `ui/`(界面、文案、交互) | 覆盖文件后**刷新页面**即可 |
+| 改了 `src/`(路由、定时器、领域逻辑,即 `lib/index.js`) | 必须**重启 DeepSeek Harness** |
+
+两种更新方式:
+
+1. **工作台里**:设置 → 版本与更新 → 「检查更新」→「一键更新」。
+   会下载 GitHub 上的最新版本、备份当前版本到 `~/.dsh/shipping-workbench/plugin-backup/`,
+   后端有变化时明确提示需要重启。
+2. **命令行**:
+
+```bash
+./update.command            # 检查并更新
+./update.command --check    # 只看有没有新版本
+./update.command --restart  # 更新完自动重启应用
+```
+
+更新源默认 `jacksonw111/shipping-workbench` 的 `main` 分支,可在
+`~/.dsh/shipping-workbench/settings.json` 的 `update` 段覆盖(`owner` / `repo` / `branch`)。
 
 ## 配置
 

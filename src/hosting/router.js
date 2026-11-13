@@ -83,7 +83,7 @@ function pageParams(url, { limit = 20 } = {}) {
 }
 
 async function handleApi(req, res, url, route, services) {
-  const { settings, wechat, track, schedule, congestion, mail, llm, hotspot, db } = services;
+  const { settings, wechat, track, schedule, congestion, mail, llm, hotspot, db, updater } = services;
   const method = req.method ?? 'GET';
   // URL 路径是百分号编码的,文件名/文章 key 里可能有中文与括号。
   const [head, ...rest] = route.split('/').filter(Boolean).map(safeDecode);
@@ -102,6 +102,7 @@ async function handleApi(req, res, url, route, services) {
       congestion: congestion.list({ limit: 1 }),
       mailMessages: mail.listMessages().slice(0, 50),
       model: llm.availability(),
+      version: updater?.currentVersion ?? '',
     });
   }
 
@@ -121,6 +122,18 @@ async function handleApi(req, res, url, route, services) {
 
   if (head === 'carriers' && method === 'GET') {
     return sendJson(res, 200, { carriers: db.listCarriers() });
+  }
+
+  // 版本与更新:查远端 package.json;apply 会下载并覆盖 lib/ui(后端变更需重启)。
+  if (head === 'update' && method === 'GET') {
+    if (!updater) throw new HttpError(501, '当前安装没有更新器');
+    return sendJson(res, 200, await updater.check());
+  }
+
+  if (head === 'update' && method === 'POST') {
+    if (!updater) throw new HttpError(501, '当前安装没有更新器');
+    const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    return sendJson(res, 200, await updater.apply({ force: Boolean(body.force) }));
   }
 
   if (head === 'settings' && method === 'POST') {

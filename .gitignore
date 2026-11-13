@@ -1,5 +1,7 @@
 node_modules/
-.verify-data/
-screenshots/
+dist/
 *.tgz
 .DS_Store
+.verify-data/
+
+screenshots/

@@ -56,7 +56,7 @@ function startServer(home, options = {}) {
   const schedule = new ScheduleService(db, home, llm);
   const mail = new MailService(home, settings);
   const hotspot = new HotspotService(db, llm, home);
-  const handler = createHandler({ settings, wechat, track, schedule, congestion, mail, llm, hotspot, db });
+  const handler = createHandler({ settings, wechat, track, schedule, congestion, mail, llm, hotspot, db, updater: options.updater });
   const server = http.createServer((req, res) => {
     handler(req, res, new URL(req.url, `http://${req.headers.host}`));
   });
@@ -395,6 +395,55 @@ test('船期对比:标准表头不需要模型介入', async () => {
     assert.equal(data.ok, true);
     assert.equal(data.needsModel, false);
     assert.deepEqual(data.missing, []);
+  } finally {
+    server.close();
+  }
+});
+
+test('版本更新接口:检查与一键更新', async () => {
+  const home = tempHome();
+  const applied = [];
+  const updater = {
+    currentVersion: '0.10.0',
+    check: async () => ({ current: '0.10.0', latest: '0.11.0', hasUpdate: true }),
+    apply: async (options) => {
+      applied.push(options);
+      return { skipped: false, from: '0.10.0', to: '0.11.0', backendChanged: true, restartRequired: true, uiOnly: false };
+    },
+  };
+  const server = await startServer(home, { updater });
+  const base = `http://127.0.0.1:${server.address().port}/shipping-workbench/api`;
+  try {
+    let response = await fetch(`${base}/bootstrap`);
+    let data = await response.json();
+    assert.equal(data.version, '0.10.0', 'bootstrap 里要带当前版本');
+
+    response = await fetch(`${base}/update`);
+    data = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(data.hasUpdate, true);
+
+    response = await fetch(`${base}/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    data = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(data.restartRequired, true);
+    assert.equal(applied.length, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test('没有更新器时接口给 501,而不是 500', async () => {
+  const home = tempHome();
+  const server = await startServer(home);
+  const base = `http://127.0.0.1:${server.address().port}/shipping-workbench/api`;
+  try {
+    const response = await fetch(`${base}/update`);
+    assert.equal(response.status, 501);
   } finally {
     server.close();
   }

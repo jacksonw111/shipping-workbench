@@ -1,0 +1,242 @@
+[
+  {
+    "id": "pil-guangzhou",
+    "name": "PIL 广州",
+    "format": "excel",
+    "source": "邮件",
+    "description": "每天一封、时间不固定；附件 excel 带日期命名，正文也有内容。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "excel"
+      },
+      "match": {
+        "subjectIncludes": [
+          "PIL"
+        ],
+        "filenameIncludes": [
+          "pil"
+        ]
+      }
+    }
+  },
+  {
+    "id": "panda",
+    "name": "PANDA",
+    "format": "pdf",
+    "source": "邮件",
+    "description": "爬虫从官网下载后邮件转发；需先把 PDF 解析成 excel 再对比，注意跨页。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "pdf"
+      },
+      "match": {
+        "subjectIncludes": [
+          "PANDA"
+        ],
+        "filenameIncludes": [
+          "rasp"
+        ]
+      }
+    }
+  },
+  {
+    "id": "matson",
+    "name": "Matson",
+    "format": "pdf",
+    "source": "官网",
+    "description": "官网 PDF；始发港+SVC+船名+航次 判新增/删除，SVC+船名+航次 判变更。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "pdf"
+      },
+      "keys": [
+        {
+          "name": "主键",
+          "columns": [
+            "始发港",
+            "SVC",
+            "船名",
+            "航次"
+          ]
+        },
+        {
+          "name": "次键",
+          "columns": [
+            "SVC",
+            "船名",
+            "航次"
+          ]
+        }
+      ],
+      "match": {
+        "subjectIncludes": [
+          "MATSON"
+        ],
+        "filenameIncludes": [
+          "matson"
+        ]
+      }
+    }
+  },
+  {
+    "id": "zim-xiamen",
+    "name": "ZIM 厦门",
+    "format": "excel",
+    "source": "邮件",
+    "description": "有变动才发邮件，时间与频率都不固定；附件名不含日期，正文只列部分变动。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "excel"
+      },
+      "match": {
+        "subjectIncludes": [
+          "ZIM"
+        ],
+        "filenameIncludes": [
+          "zim"
+        ]
+      }
+    }
+  },
+  {
+    "id": "msc-xiamen",
+    "name": "MSC 厦门",
+    "format": "excel",
+    "source": "厦门外代",
+    "description": "公告中心按周发布、批次号在标题后缀；下载是压缩包，个别单元格带批注。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "zip"
+      },
+      "parse": {
+        "ignoreColumns": [
+          "批注"
+        ]
+      },
+      "match": {
+        "subjectIncludes": [
+          "MSC"
+        ],
+        "filenameIncludes": [
+          "msc"
+        ]
+      }
+    }
+  },
+  {
+    "id": "fesco",
+    "name": "FESCO",
+    "format": "pdf",
+    "source": "邮件",
+    "description": "分航线，每航线一个 PDF，文件名一致，可按版本对比。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "pdf"
+      },
+      "match": {
+        "subjectIncludes": [
+          "FESCO"
+        ],
+        "filenameIncludes": [
+          "fesco"
+        ]
+      }
+    }
+  },
+  {
+    "id": "ningbo-ocean",
+    "name": "宁波远洋",
+    "format": "excel",
+    "source": "人工",
+    "description": "格式固定，按航线分 sheet；相同 sheet 对比后汇总。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "excel"
+      },
+      "output": {
+        "merge": true
+      },
+      "match": {
+        "subjectIncludes": [
+          "宁波远洋"
+        ],
+        "filenameIncludes": [
+          "宁波远洋"
+        ]
+      }
+    }
+  },
+  {
+    "id": "snl",
+    "name": "SNL 外运集运",
+    "format": "excel",
+    "source": "官网",
+    "description": "每日更新 2–3 次；附件名带月份与版本，按航线分 sheet。",
+    "keyColumns": [
+      "始发港",
+      "SVC",
+      "船名",
+      "航次"
+    ],
+    "profile": {
+      "ingest": {
+        "kind": "excel"
+      },
+      "output": {
+        "merge": true
+      },
+      "match": {
+        "subjectIncludes": [
+          "SNL",
+          "外运集运",
+          "SINOLINES"
+        ],
+        "filenameIncludes": [
+          "snl"
+        ]
+      }
+    }
+  }
+]

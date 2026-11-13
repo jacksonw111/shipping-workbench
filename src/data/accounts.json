@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mp-msc",
+    "name": "MSC 地中海航运",
+    "biz": "MzU2MjYwODM0Ng==",
+    "albumId": "2456831253753806848",
+    "intervalMinutes": 120,
+    "enabled": true
+  },
+  {
+    "id": "mp-jctrans",
+    "name": "JCtrans 杰西圈",
+    "biz": "Mzg4NDgxMjAzNQ==",
+    "albumId": "2577599447476666371",
+    "intervalMinutes": 120,
+    "enabled": true
+  },
+  {
+    "id": "mp-hongyun",
+    "name": "泓昀国际 STL",
+    "biz": "MzkyOTYxNjU0OA==",
+    "albumId": "4164504117865267206",
+    "intervalMinutes": 60,
+    "enabled": true
+  }
+]

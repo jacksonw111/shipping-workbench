@@ -70,6 +70,7 @@ const state = {
     detail: null,
     list: { q: '', offset: 0, limit: 10, items: [], total: 0, loading: false },
   },
+  update: { checking: false, applying: false, info: null, error: '' },
   congestion: {
     busy: false,
     list: { q: '', offset: 0, limit: 20, items: [], total: 0, loading: false },
@@ -2111,8 +2112,37 @@ const SETTING_FIELDS = {
 
 function renderSettings(view) {
   const settings = state.boot?.settings ?? {};
+  const version = state.boot?.version ?? '';
+  const update = state.update;
+  const info = update.info;
   view.innerHTML = `
     <div class="page-head"><h1 class="page-title">设置</h1></div>
+    <div class="card">
+      <div class="row">
+        <span class="chip">当前 v${esc(version || '未知')}</span>
+        ${
+          info?.error
+            ? `<span class="chip chip-danger" title="${esc(info.error)}">检查失败</span>`
+            : info?.hasUpdate
+              ? `<span class="chip chip-new">最新 v${esc(info.latest)}</span>`
+              : info
+                ? '<span class="chip chip-ok">已是最新</span>'
+                : ''
+        }
+        <span class="spacer"></span>
+        <button class="btn btn-ghost" id="update-check" ${update.checking || update.applying ? 'disabled' : ''}>${
+          update.checking ? '检查中…' : '检查更新'
+        }</button>
+        <button class="btn btn-primary" id="update-apply" ${
+          !info?.hasUpdate || update.applying ? 'disabled' : ''
+        }>${update.applying ? '<span class="spinner"></span> 更新中' : '一键更新'}</button>
+      </div>
+      ${
+        update.error
+          ? `<div class="banner banner-warn" style="margin-top:10px">${esc(update.error)}</div>`
+          : ''
+      }
+    </div>
     ${Object.entries(SETTING_FIELDS)
       .map(
         ([section, fields]) => `
@@ -2152,6 +2182,56 @@ function renderSettings(view) {
       }
     });
   });
+  view.querySelector('#update-check')?.addEventListener('click', checkUpdate);
+  view.querySelector('#update-apply')?.addEventListener('click', applyUpdate);
+}
+
+async function checkUpdate() {
+  const cursor = state.update;
+  cursor.checking = true;
+  cursor.error = '';
+  render();
+  try {
+    cursor.info = await api('/update');
+    if (cursor.info.error) cursor.error = `检查更新失败:${cursor.info.error}`;
+  } catch (error) {
+    cursor.error = error.message;
+  } finally {
+    cursor.checking = false;
+    render();
+  }
+}
+
+async function applyUpdate() {
+  const cursor = state.update;
+  cursor.applying = true;
+  cursor.error = '';
+  render();
+  try {
+    const result = await api('/update', { method: 'POST', body: '{}' });
+    if (result.skipped) {
+      toast(result.reason ?? '已是最新版本', 'info');
+    } else {
+      toast(`已更新到 v${result.to}`, 'ok');
+      withRestart(cursor, result);
+    }
+    cursor.info = { ...(cursor.info ?? {}), current: result.to, hasUpdate: false };
+    await refreshBoot();
+  } catch (error) {
+    cursor.error = error.message;
+  } finally {
+    cursor.applying = false;
+    render();
+  }
+}
+
+/** 后端换了就得重启;只换了界面刷新页面即可。 */
+function withRestart(cursor, result) {
+  if (result.restartRequired) {
+    cursor.error = `已更新到 v${result.to},后端代码需要重启 DeepSeek Harness 后生效(界面刷新即可看到新 UI)`;
+    return;
+  }
+  cursor.error = `已更新到 v${result.to} 的界面文件,刷新页面即可看到`;
 }
 
 /* ------------------------------------------------------------------ wiring */

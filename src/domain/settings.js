@@ -25,6 +25,12 @@ export const DEFAULT_SETTINGS = {
     sogouMaxArticles: 12,
     lookupProbeCount: 8,
   },
+  // 跟随更新的源;默认就是本仓库的 main 分支。
+  update: {
+    owner: 'jacksonw111',
+    repo: 'shipping-workbench',
+    branch: 'main',
+  },
   mail: {
     host: 'imap.exmail.qq.com',
     port: 993,

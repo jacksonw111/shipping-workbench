@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { workbenchHome } from './util/paths.js';
 import { WorkbenchDb } from './domain/db.js';
 import { SettingsStore } from './domain/settings.js';
@@ -11,6 +12,7 @@ import { ScheduleService } from './domain/schedule-service.js';
 import { MailService } from './domain/mail-service.js';
 import { createHandler, PREFIX } from './hosting/router.js';
 import { ingestMailAttachments } from './domain/mail-ingest.js';
+import { Updater } from './domain/updater.js';
 
 export const name = 'shipping-workbench';
 
@@ -45,7 +47,10 @@ function mount(ctx, config = {}) {
   const hotspot = new HotspotService(db, llm, home);
   const track = new TrackService(db, home, congestion, llm, settings);
   const schedule = new ScheduleService(db, home, llm);
-  const handler = createHandler({ settings, wechat, track, schedule, congestion, mail, llm, hotspot, db });
+  // 已安装的插件目录:bundle 里是 lib/ 的上一级,源码直跑时是 src/ 的上一级。
+  const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const updater = new Updater({ appDir, home, source: settings.read().update ?? {} });
+  const handler = createHandler({ settings, wechat, track, schedule, congestion, mail, llm, hotspot, db, updater });
 
   ctx.effect(
     () =>

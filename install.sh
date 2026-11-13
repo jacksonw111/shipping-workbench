@@ -29,7 +29,8 @@ mkdir -p "$TARGET" "$PROFILE_DIR/node_modules"
 echo "安装到:$TARGET"
 rm -rf "$TARGET"
 mkdir -p "$TARGET"
-cp -R "$HERE/lib" "$HERE/ui" "$HERE/package.json" "$HERE/README.md" "$HERE/cordis.patch.yml" "$TARGET/"
+cp -R "$HERE/lib" "$HERE/ui" "$HERE/src" "$HERE/scripts" "$TARGET/"
+cp "$HERE/package.json" "$HERE/README.md" "$HERE/cordis.patch.yml" "$HERE/update.command" "$HERE/restart.command" "$TARGET/"
 
 # 1) 依赖声明:pnpmp 只会清理"package.json 里没有"的包
 python3 - "$PROFILE_DIR/package.json" "$TARGET" <<'PY'
