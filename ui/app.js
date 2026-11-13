@@ -71,6 +71,7 @@ const state = {
     list: { q: '', offset: 0, limit: 10, items: [], total: 0, loading: false },
   },
   update: { checking: false, applying: false, info: null, error: '' },
+  prompts: { loaded: false, loading: false, track: { default: '', override: '', system: '' }, draft: null, saving: false },
   congestion: {
     busy: false,
     list: { q: '', offset: 0, limit: 20, items: [], total: 0, loading: false },
@@ -819,6 +820,13 @@ function findingsHtml(report) {
       <span class="chip ${model.checked ? 'chip-new' : 'chip-warn'}">Agent 判定 ${
         model.checked ?? 0
       }/${model.total ?? 0}</span>
+      ${
+        model.calls
+          ? `<span class="chip">${model.candidates ?? 0} 个候选 · ${model.calls} 次请求${
+              model.truncated ? ` · 截断 ${model.truncated}` : ''
+            }</span>`
+          : ''
+      }
       ${suppressed ? `<span class="chip">${suppressed} 处 ≤1 天不提醒</span>` : ''}
       <span class="chip">塞港命中 ${stats.congestionHits ?? 0}</span>
   `;
@@ -1061,7 +1069,11 @@ function reportHtml(report) {
         <span class="chip">${stats.groups} 条轨迹</span>
         <span class="chip ${stats.flagged ? 'chip-danger' : 'chip-ok'}">${stats.flagged} 条异常</span>
         <span class="chip ${stats.model?.checked ? 'chip-new' : 'chip-warn'}">${
-          stats.model?.checked ? `Agent ${stats.model.checked}/${stats.model.total}` : '未跑 Agent'
+          stats.model?.checked
+            ? `Agent ${stats.model.checked}/${stats.model.total}${
+                stats.model.calls ? ` · ${stats.model.calls} 次请求` : ''
+              }`
+            : '未跑 Agent'
         }</span>
         <span class="chip">${stats.comments} 条备注</span>
         <span class="spacer"></span>
@@ -2094,8 +2106,11 @@ const SETTING_FIELDS = {
     ['congestionMinWaitDays', '塞港冲突:最少等泊天数', 'number'],
     ['congestionGapDays', '塞港冲突:至少多出天数', 'number'],
     ['llmConcurrency', '模型并发', 'number'],
-    ['llmBatchSize', '每条请求判几条轨迹', 'number'],
-    ['llmMaxGroups', '最多判定轨迹数(0=全部)', 'number'],
+    ['llmCharBudget', '单次请求字符预算', 'number'],
+    ['llmMaxCalls', '最多请求次数(0=不限)', 'number'],
+    ['llmMaxCandidates', '最多送模型多少组', 'number'],
+    ['llmOutlierMinDays', '统计异常:航段天数下限', 'number'],
+    ['llmOutlierRatio', '统计异常:本航线中位数倍数', 'number'],
   ],
   mail: [
     ['host', 'IMAP 服务器', 'text'],
@@ -2143,6 +2158,18 @@ function renderSettings(view) {
           : ''
       }
     </div>
+    <div class="card">
+      <div class="card-title"><strong>轨迹判定提示词</strong></div>
+      <textarea id="track-prompt" class="input" rows="12" style="width:100%;font-family:var(--mono,monospace);line-height:1.6">${esc(
+        state.prompts.draft ?? (state.prompts.track.override || state.prompts.track.default || ''),
+      )}</textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary" id="prompt-save" ${state.prompts.saving ? 'disabled' : ''}>保存提示词</button>
+        <button class="btn btn-ghost" id="prompt-reset" ${state.prompts.saving ? 'disabled' : ''}>恢复默认</button>
+        <span class="spacer"></span>
+        <span class="field-note">${state.prompts.track.override ? '正在使用自定义提示词' : '正在使用内置默认'}</span>
+      </div>
+    </div>
     ${Object.entries(SETTING_FIELDS)
       .map(
         ([section, fields]) => `
@@ -2184,6 +2211,55 @@ function renderSettings(view) {
   });
   view.querySelector('#update-check')?.addEventListener('click', checkUpdate);
   view.querySelector('#update-apply')?.addEventListener('click', applyUpdate);
+  const promptBox = view.querySelector('#track-prompt');
+  promptBox?.addEventListener('input', () => {
+    state.prompts.draft = promptBox.value;
+  });
+  view.querySelector('#prompt-save')?.addEventListener('click', saveTrackPrompt);
+  view.querySelector('#prompt-reset')?.addEventListener('click', resetTrackPrompt);
+  if (!state.prompts.loaded && !state.prompts.loading) loadPrompts();
+}
+
+async function loadPrompts() {
+  state.prompts.loading = true;
+  try {
+    const data = await api('/prompts');
+    state.prompts.track = data.track ?? state.prompts.track;
+    state.prompts.loaded = true;
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    state.prompts.loading = false;
+    render();
+  }
+}
+
+async function savePromptOverride(value) {
+  state.prompts.saving = true;
+  render();
+  try {
+    const data = await api('/settings', { method: 'POST', body: JSON.stringify({ track: { promptOverride: value } }) });
+    state.boot.settings = data.settings;
+    state.prompts.loaded = false;
+    state.prompts.draft = null;
+    toast(value ? '已保存自定义提示词' : '已恢复默认提示词', 'ok');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    state.prompts.saving = false;
+    render();
+  }
+}
+
+function saveTrackPrompt() {
+  const box = document.getElementById('track-prompt');
+  const value = box ? box.value : state.prompts.draft;
+  return savePromptOverride(String(value ?? ''));
+}
+
+function resetTrackPrompt() {
+  state.prompts.draft = null;
+  return savePromptOverride('');
 }
 
 async function checkUpdate() {

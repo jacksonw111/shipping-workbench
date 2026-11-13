@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { HttpError, readBody, sendError, sendJson, parseMultipart } from '../util/http-util.js';
 import { ingestMailAttachments } from '../domain/mail-ingest.js';
 import { buildSchedulePairs } from '../domain/schedule-pairs.js';
+import { BATCH_SYSTEM_PROMPT, trackSystemPrompt } from '../domain/llm.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UI_DIR =
@@ -122,6 +123,19 @@ async function handleApi(req, res, url, route, services) {
 
   if (head === 'carriers' && method === 'GET') {
     return sendJson(res, 200, { carriers: db.listCarriers() });
+  }
+
+  // 判定提示词:默认 + 自定义覆盖,设置页展示/编辑用。
+  if (head === 'prompts' && method === 'GET') {
+    const track = settings.read().track ?? {};
+    const override = String(track.promptOverride ?? '');
+    return sendJson(res, 200, {
+      track: {
+        default: BATCH_SYSTEM_PROMPT,
+        override,
+        system: trackSystemPrompt(override),
+      },
+    });
   }
 
   // 版本与更新:查远端 package.json;apply 会下载并覆盖 lib/ui(后端变更需重启)。

@@ -1,6 +1,6 @@
 {
   "name": "shipping-workbench",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "private": false,
   "description": "DeepSeek Harness 插件:船期数据工作台(公众号更新 / 轨迹检测 / 船期表对比 / 邮件附件)",
   "type": "module",

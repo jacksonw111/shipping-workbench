@@ -378,7 +378,17 @@ export function buildTrackReport(parsed, groups, meta = {}) {
       // 被「1 天内不提醒」抑制的可疑段数
       suppressed: Number(meta.suppressed) || 0,
       model: meta.llm && !meta.llm.skipped
-        ? { checked: meta.llm.checked, total: meta.llm.total, suspicious: meta.llm.suspicious ?? 0 }
+        ? {
+            checked: meta.llm.checked,
+            total: meta.llm.total,
+            suspicious: meta.llm.suspicious ?? 0,
+            // 预筛与调用预算:界面上要能看出「只问了几次、覆盖了多少组」。
+            candidates: meta.llm.candidates ?? 0,
+            calls: meta.llm.calls ?? 0,
+            requests: meta.llm.requests ?? 0,
+            truncated: meta.llm.truncated ?? 0,
+            prefilter: meta.llm.prefilter ?? null,
+          }
         : { checked: 0, total: 0, suspicious: 0 },
     },
     sheets,

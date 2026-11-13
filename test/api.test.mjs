@@ -448,3 +448,27 @@ test('没有更新器时接口给 501,而不是 500', async () => {
     server.close();
   }
 });
+
+test('判定提示词接口:返回默认与自定义', async () => {
+  const home = tempHome();
+  const server = await startServer(home);
+  const base = `http://127.0.0.1:${server.address().port}/shipping-workbench/api`;
+  try {
+    let data = await fetch(`${base}/prompts`).then((res) => res.json());
+    assert.ok(data.track.default.includes('Rotation'));
+    assert.equal(data.track.override, '');
+    assert.equal(data.track.system, data.track.default);
+
+    await fetch(`${base}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ track: { promptOverride: '只输出可疑段' } }),
+    });
+    data = await fetch(`${base}/prompts`).then((res) => res.json());
+    assert.equal(data.track.override, '只输出可疑段');
+    assert.equal(data.track.system, '只输出可疑段');
+    assert.ok(data.track.default.includes('Rotation'), '默认提示词仍然可读');
+  } finally {
+    server.close();
+  }
+});

@@ -13,6 +13,7 @@ import {
   exportTrackReport,
 } from './track.js';
 import { DEFAULT_CONGESTION_RULE, enrichWithCongestion } from './congestion.js';
+import { selectCandidates } from './track-candidates.js';
 import { writeXlsx } from './xlsx-writer.js';
 
 /** 读取「1 天内不提醒」的窗口;配置缺失或非法时退回默认 1 天。 */
@@ -125,13 +126,19 @@ export class TrackService {
 
     let llmInfo = { skipped: true, reason: availability.available ? '未启用模型判定' : availability.reason };
     if (wantModel) {
-      const candidates = groups.filter((group) => !group.skipped).length;
-      onProgress({ phase: 'model', done: 0, total: candidates });
+      // 先本地预筛:只有规则硬错、塞港冲突、统计异常才值得模型看一眼。
+      const prefilter = selectCandidates(groups, {
+        maxCandidates: Number(config.llmMaxCandidates ?? 400),
+        minDays: Number(config.llmOutlierMinDays ?? 25),
+        ratio: Number(config.llmOutlierRatio ?? 2.5),
+      });
+      onProgress({ phase: 'model', done: 0, total: prefilter.candidates });
       try {
-        const result = await this.llm.check(groups, {
-          maxGroups: Number(config.llmMaxGroups ?? 0),
+        const result = await this.llm.check(prefilter.groups, {
           concurrency: Math.max(1, Number(config.llmConcurrency ?? 4)),
-          batchSize: Math.max(1, Number(config.llmBatchSize ?? 4)),
+          charBudget: Math.max(2000, Number(config.llmCharBudget ?? 30000)),
+          maxCalls: Math.max(0, Number(config.llmMaxCalls ?? 12)),
+          promptOverride: String(config.promptOverride ?? ''),
           onProgress: (progress) => onProgress({ phase: 'model', ...progress }),
         });
         if (!result.skipped) {
@@ -139,9 +146,16 @@ export class TrackService {
           llmInfo = {
             skipped: false,
             checked: result.checked,
-            total: result.total,
-            truncated: result.truncated,
+            total: prefilter.scanned,
+            truncated: prefilter.truncated + result.truncated,
             suspicious: result.suspicious,
+            // 调用次数与预筛构成,界面要能看出「为什么只问了这么几次」。
+            calls: result.calls,
+            requests: result.requests,
+            cached: result.cached,
+            candidates: prefilter.candidates,
+            scanned: prefilter.scanned,
+            prefilter: prefilter.reasons,
           };
         } else {
           llmInfo = result;

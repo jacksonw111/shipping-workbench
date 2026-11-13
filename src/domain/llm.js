@@ -3,7 +3,7 @@ import path from 'node:path';
 import { readJson, writeJson } from '../util/json-store.js';
 import { ensureDir } from '../util/paths.js';
 
-const BATCH_SYSTEM_PROMPT = [
+export const BATCH_SYSTEM_PROMPT = [
   '你是集装箱航线的挂港计划审核员。',
   '下面给你若干条 Rotation,每条含完整挂港序列(港口、五字码、累计航程、航向、码头)与逐段天数。',
   '累计航程是自第一个港口起算的累计值,不是单段天数。',
@@ -12,6 +12,15 @@ const BATCH_SYSTEM_PROMPT = [
   '只输出 JSON:{"results":[{"rotation":"<原样回填 Rotation ID|版本>","suspicious":[{"from":排序,"to":排序,"days":天数,"reason":"不超过 40 字","confidence":0 到 1}]}]}',
   '没有可疑段的 rotation 也要出现,给空数组。不要输出任何其它文字。',
 ].join('\n');
+
+/**
+ * 轨迹批量判定的 system 提示词:设置里填了自定义就用自定义,否则用内置默认。
+ * 界面上的「轨迹判定提示词」显示的也是这里的结果。
+ */
+export function trackSystemPrompt(override) {
+  const custom = String(override ?? '').trim();
+  return custom || BATCH_SYSTEM_PROMPT;
+}
 
 const SYSTEM_PROMPT = [
   '你是集装箱航线的挂港计划审核员。',
@@ -103,59 +112,102 @@ export class LlmChecker {
     return lines.join('\n');
   }
 
-  /** Returns `{ result: Map(rotationKey -> suspicious[]) }` or `{ skipped, reason }`. */
-  async check(groups, { maxGroups = 0, concurrency = 4, batchSize = 4, onProgress = () => {} } = {}) {
+  /**
+   * 批量判定。
+   *
+   * 调用次数由「字符预算」决定,不是固定几条一组:把候选航段按 ~charBudget 字符拼成一次请求,
+   * 再用 maxCalls 兜底。这样 1.4k 组全量只需要个位数到十几次请求,而不是几百次。
+   *
+   * @returns `{ result, checked, total, truncated, suspicious, calls, requests, cached }`
+   */
+  async check(
+    groups,
+    {
+      maxGroups = 0,
+      concurrency = 4,
+      charBudget = 20000,
+      maxCalls = 20,
+      promptOverride = '',
+      onProgress = () => {},
+    } = {},
+  ) {
     const availability = this.availability();
     if (!availability.available) return { skipped: true, reason: availability.reason };
     const selection = this.selection();
+    const system = trackSystemPrompt(promptOverride);
     const candidates = groups.filter((group) => !group.skipped);
     const targets = maxGroups > 0 ? candidates.slice(0, maxGroups) : candidates;
     if (targets.length === 0) return { skipped: true, reason: '没有可判定的轨迹组' };
     const stats = collectPairStats(groups);
-    const size = Math.max(1, Number(batchSize) || 4);
+
+    // 按字符预算打包:一个组一条 prompt,攒到预算就发一次。
+    const budget = Math.max(2000, Number(charBudget) || 20000);
     const batches = [];
-    for (let index = 0; index < targets.length; index += size) {
-      batches.push(targets.slice(index, index + size));
+    let current = [];
+    let currentChars = 0;
+    for (const group of targets) {
+      const prompt = this.buildPrompt(group, stats);
+      if (current.length > 0 && currentChars + prompt.length > budget) {
+        batches.push(current);
+        current = [];
+        currentChars = 0;
+      }
+      current.push({ group, prompt });
+      currentChars += prompt.length + 8;
     }
+    if (current.length > 0) batches.push(current);
+
+    const limit = Number(maxCalls) > 0 ? Math.min(batches.length, Number(maxCalls)) : batches.length;
+    const used = batches.slice(0, limit);
+    const covered = used.reduce((sum, batch) => sum + batch.length, 0);
+
     const result = new Map();
-    let cursor = 0;
-    let failure = null;
+    const state = { cursor: 0, failure: null, requests: 0, cached: 0 };
     const worker = async () => {
-      while (cursor < batches.length && !failure) {
-        const batch = batches[cursor];
-        cursor += 1;
-        const prompt = batch.map((group) => this.buildPrompt(group, stats)).join('\n\n---\n\n');
-        const key = createHash('sha1').update(`${selection.provider}/${selection.model}\u0000${prompt}`).digest('hex');
+      while (state.cursor < used.length && !state.failure) {
+        const batch = used[state.cursor];
+        state.cursor += 1;
+        const prompt = batch.map((item) => item.prompt).join('\n\n---\n\n');
+        const key = createHash('sha1')
+          .update(`${selection.provider}/${selection.model}\u0000${system}\u0000${prompt}`)
+          .digest('hex');
         let answers = this.cache[key];
-        if (!answers) {
+        if (answers) {
+          state.cached += 1;
+        } else {
           try {
-            answers = await this.callModel(prompt, { batch: true });
+            answers = await this.callModel(prompt, { batch: true, system });
+            state.requests += 1;
             this.cache[key] = answers;
           } catch (error) {
-            failure = error;
+            state.failure = error;
             return;
           }
         }
         const normalized = normalizeAnswers(answers);
-        for (const group of batch) {
-          result.set(group.key, lookupAnswer(normalized, group) ?? []);
+        for (const item of batch) {
+          result.set(item.group.key, lookupAnswer(normalized, item.group) ?? []);
           onProgress({ done: result.size, total: targets.length });
         }
       }
     };
     try {
-      await Promise.all(Array.from({ length: Math.min(concurrency, targets.length) }, worker));
+      await Promise.all(Array.from({ length: Math.min(concurrency, used.length) }, worker));
     } finally {
       writeJson(this.cacheFile, this.cache);
     }
-    if (failure) throw failure;
+    if (state.failure) throw state.failure;
     const suspiciousCount = [...result.values()].reduce((sum, list) => sum + (list?.length ?? 0), 0);
     return {
       skipped: false,
       checked: result.size,
       total: candidates.length,
-      truncated: candidates.length - targets.length,
+      truncated: candidates.length - covered,
       suspicious: suspiciousCount,
+      // 实际发出的请求数(缓存命中不算)与批次数,界面上要说清楚。
+      calls: used.length,
+      requests: state.requests,
+      cached: state.cached,
       result,
     };
   }
@@ -210,9 +262,9 @@ export class LlmChecker {
     return text;
   }
 
-  async callModel(prompt, { batch = false } = {}) {
+  async callModel(prompt, { batch = false, system = '' } = {}) {
     const text = await this.complete({
-      system: batch ? BATCH_SYSTEM_PROMPT : SYSTEM_PROMPT,
+      system: system || (batch ? BATCH_SYSTEM_PROMPT : SYSTEM_PROMPT),
       prompt,
       temperature: 0,
     });

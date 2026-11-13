@@ -12,6 +12,16 @@ export const DEFAULT_SETTINGS = {
     // 航段天数不超过该值时,塞港/模型判出的可疑点不提醒(产品口径:1 天)。
     suppressWithinDays: 1,
     llmConcurrency: 4,
+    // 调用预算:按字符打包 + 请求次数兜底,不再「每条请求判几条轨迹」。
+    llmCharBudget: 30000,
+    llmMaxCalls: 12,
+    // 本地预筛:最多送多少组、多少天算统计异常。
+    llmMaxCandidates: 400,
+    llmOutlierMinDays: 25,
+    llmOutlierRatio: 2.5,
+    // 自定义判定提示词;空串表示用内置默认。
+    promptOverride: '',
+    // 兼容旧配置,已不再使用。
     llmBatchSize: 4,
     llmMaxGroups: 0,
   },
