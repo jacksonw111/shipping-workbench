@@ -20,7 +20,13 @@ export const DEFAULT_CANDIDATE_RULE = {
   ratioFloorDays: 7,
   /** 纯「统计异常」最多补多少个组;规则/塞港命中的不受此限。 */
   outlierTop: 120,
+  /** `candidates` 只判疑点;`all` 把全部有效组都送模型(慢,但覆盖 100%)。 */
+  scope: 'candidates',
 };
+
+function rowsOf(list) {
+  return list.reduce((sum, group) => sum + (group.rows?.length ?? 0), 0);
+}
 
 function percentile(sorted, p) {
   if (sorted.length === 0) return 0;
@@ -34,7 +40,9 @@ function percentile(sorted, p) {
  */
 export function selectCandidates(groups, rule = {}) {
   const config = { ...DEFAULT_CANDIDATE_RULE, ...(rule ?? {}) };
-  const maxCandidates = Math.max(1, Number(config.maxCandidates) || DEFAULT_CANDIDATE_RULE.maxCandidates);
+  // 0 表示不限;只有显式给 0 才当「不限」,缺省仍走默认上限。
+  const rawMax = Number(config.maxCandidates);
+  const maxCandidates = Number.isFinite(rawMax) && rawMax <= 0 ? Infinity : Math.max(1, rawMax || DEFAULT_CANDIDATE_RULE.maxCandidates);
   const minDays = Math.max(1, Number(config.minDays) || DEFAULT_CANDIDATE_RULE.minDays);
   const ratio = Number(config.ratio) > 1 ? Number(config.ratio) : DEFAULT_CANDIDATE_RULE.ratio;
   const ratioFloor = Number(config.ratioFloorDays) > 0 ? Number(config.ratioFloorDays) : DEFAULT_CANDIDATE_RULE.ratioFloorDays;
@@ -46,6 +54,22 @@ export function selectCandidates(groups, rule = {}) {
     .sort((left, right) => left - right);
   // 用 p99 而不是 p95:长航段本来就多,p95 会把几百组都算成「异常」。
   const p99 = Math.max(minDays, percentile(allDays, 0.99));
+
+  if (config.scope === 'all') {
+    // 全量模式就是全量:不看疑点、不受候选上限限制,所有有效组都送模型。
+    const keptAll = active;
+    return {
+      groups: keptAll,
+      candidates: keptAll.length,
+      scanned: active.length,
+      truncated: active.length - keptAll.length,
+      reasons: { rule: 0, congestion: 0, outlier: 0, all: keptAll.length },
+      rows: rowsOf(keptAll),
+      rowsScanned: rowsOf(active),
+      p99,
+      scope: 'all',
+    };
+  }
 
   const picked = [];
   for (const group of active) {
@@ -83,17 +107,21 @@ export function selectCandidates(groups, rule = {}) {
     .slice(0, Math.max(0, Number(config.outlierTop) || DEFAULT_CANDIDATE_RULE.outlierTop));
   const merged = [...hard, ...soft];
   merged.sort((left, right) => right.score - left.score);
-  const kept = merged.slice(0, maxCandidates);
+  const kept = Number.isFinite(maxCandidates) ? merged.slice(0, maxCandidates) : merged;
+  const selectedGroups = kept.map((item) => item.group);
   return {
-    groups: kept.map((item) => item.group),
-    candidates: kept.length,
+    groups: selectedGroups,
+    candidates: selectedGroups.length,
     scanned: active.length,
-    truncated: Math.max(0, merged.length - kept.length),
+    truncated: Math.max(0, merged.length - selectedGroups.length),
     reasons: {
       rule: kept.filter((item) => item.reasons.includes('rule')).length,
       congestion: kept.filter((item) => item.reasons.includes('congestion')).length,
       outlier: kept.filter((item) => item.reasons.includes('outlier')).length,
     },
+    rows: rowsOf(selectedGroups),
+    rowsScanned: rowsOf(active),
     p99,
+    scope: 'candidates',
   };
 }

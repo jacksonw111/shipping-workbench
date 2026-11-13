@@ -388,6 +388,9 @@ export function buildTrackReport(parsed, groups, meta = {}) {
             requests: meta.llm.requests ?? 0,
             truncated: meta.llm.truncated ?? 0,
             prefilter: meta.llm.prefilter ?? null,
+            rowsSent: meta.llm.rowsSent ?? 0,
+            rowsScanned: meta.llm.rowsScanned ?? 0,
+            scope: meta.llm.scope ?? 'candidates',
           }
         : { checked: 0, total: 0, suspicious: 0 },
     },

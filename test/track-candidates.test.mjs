@@ -121,3 +121,40 @@ test('最多请求次数是硬上限,超出部分计入 truncated', async () => 
   assert.ok(result.truncated > 0, '被上限挡掉的组要如实统计');
   assert.ok(result.checked < 30);
 });
+
+test('全量模式:所有有效组都进来,并给出覆盖行数', () => {
+  const rows = (count) => Array.from({ length: count }, (_, index) => ({ order: index + 1 }));
+  const groups = [
+    Object.assign(group(1, [{ days: 3 }, { days: 4 }]), { rows: rows(2) }),
+    Object.assign(group(2, [{ days: 3 }]), { rows: rows(1) }),
+    Object.assign(group(3, [{ days: 3 }], { skipped: true }), { rows: rows(5) }),
+  ];
+  const result = selectCandidates(groups, { scope: 'all' });
+  assert.equal(result.scope, 'all');
+  assert.equal(result.candidates, 2);
+  assert.equal(result.rows, 3, '组内每一行都算进去');
+  assert.equal(result.rowsScanned, 3);
+});
+
+test('候选上限填 0 表示不限', () => {
+  const groups = Array.from({ length: 10 }, (_, index) =>
+    group(index + 1, [{ days: 3, issues: [{ type: 'negative', severity: 'error' }] }]),
+  );
+  const result = selectCandidates(groups, { maxCandidates: 0 });
+  assert.equal(result.candidates, 10);
+  assert.equal(result.truncated, 0);
+});
+
+test('单个组的 prompt 包含该组每一行挂港', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-llm-'));
+  const checker = new LlmChecker(home, {});
+  const target = group(7, [{ days: 2 }, { days: 3 }, { days: 4 }]);
+  target.rows = [
+    { order: 1, portEn: 'NINGBO', portCode: 'CNNGB', cumDays: 12, direction: 'E', terminal: 'T1' },
+    { order: 2, portEn: 'BUSAN', portCode: 'KRPUS', cumDays: 14, direction: 'E', terminal: 'T2' },
+    { order: 3, portEn: 'LAX', portCode: 'USLAX', cumDays: 28, direction: 'E', terminal: 'T3' },
+  ];
+  const prompt = checker.buildPrompt(target);
+  for (const port of ['NINGBO', 'BUSAN', 'LAX']) assert.ok(prompt.includes(port), `缺 ${port}`);
+  assert.ok(prompt.includes('共 3 个挂港'));
+});

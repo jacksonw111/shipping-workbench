@@ -827,6 +827,13 @@ function findingsHtml(report) {
             }</span>`
           : ''
       }
+      ${
+        model.rowsScanned
+          ? `<span class="chip" title="送模型的航段行 / 全部有效行">覆盖 ${model.rowsSent ?? 0}/${
+              model.rowsScanned
+            } 行${model.scope === 'all' ? '(全量)' : ''}</span>`
+          : ''
+      }
       ${suppressed ? `<span class="chip">${suppressed} 处 ≤1 天不提醒</span>` : ''}
       <span class="chip">塞港命中 ${stats.congestionHits ?? 0}</span>
   `;
@@ -2105,10 +2112,14 @@ const SETTING_FIELDS = {
   track: [
     ['congestionMinWaitDays', '塞港冲突:最少等泊天数', 'number'],
     ['congestionGapDays', '塞港冲突:至少多出天数', 'number'],
+    ['llmScope', '判定范围', 'select', [
+      ['candidates', '只判疑点(推荐)'],
+      ['all', '全量送模型'],
+    ]],
     ['llmConcurrency', '模型并发', 'number'],
     ['llmCharBudget', '单次请求字符预算', 'number'],
     ['llmMaxCalls', '最多请求次数(0=不限)', 'number'],
-    ['llmMaxCandidates', '最多送模型多少组', 'number'],
+    ['llmMaxCandidates', '候选上限(0=不限)', 'number'],
     ['llmOutlierMinDays', '统计异常:航段天数下限', 'number'],
     ['llmOutlierRatio', '统计异常:本航线中位数倍数', 'number'],
   ],
@@ -2177,8 +2188,20 @@ function renderSettings(view) {
         <div class="card-title"><strong>${{ wechat: '公众号', track: '轨迹检测', mail: '邮件' }[section]}</strong></div>
         <form data-section="${section}" class="grid-2">
           ${fields
-            .map(([key, label, type]) => {
+            .map(([key, label, type, options]) => {
               const value = settings[section]?.[key] ?? '';
+              if (type === 'select') {
+                return `<label class="field"><span>${label}</span><select class="select" name="${key}">
+                  ${(options ?? [])
+                    .map(
+                      ([optionValue, text]) =>
+                        `<option value="${esc(optionValue)}" ${
+                          String(value) === String(optionValue) ? 'selected' : ''
+                        }>${esc(text)}</option>`,
+                    )
+                    .join('')}
+                </select></label>`;
+              }
               return `<label class="field"><span>${label}</span><input class="input" type="${type}" name="${key}" value="${esc(
                 value,
               )}" ${type === 'password' ? 'autocomplete="new-password"' : ''} /></label>`;

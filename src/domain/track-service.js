@@ -128,6 +128,8 @@ export class TrackService {
     if (wantModel) {
       // 先本地预筛:只有规则硬错、塞港冲突、统计异常才值得模型看一眼。
       const prefilter = selectCandidates(groups, {
+        scope: String(config.llmScope ?? 'candidates'),
+        // 0 = 不限;界面上的「候选上限」填 0 即全量。
         maxCandidates: Number(config.llmMaxCandidates ?? 400),
         minDays: Number(config.llmOutlierMinDays ?? 25),
         ratio: Number(config.llmOutlierRatio ?? 2.5),
@@ -156,6 +158,10 @@ export class TrackService {
             candidates: prefilter.candidates,
             scanned: prefilter.scanned,
             prefilter: prefilter.reasons,
+            // 覆盖率:送模型的行数 / 全部有效行数。
+            rowsSent: prefilter.rows ?? 0,
+            rowsScanned: prefilter.rowsScanned ?? 0,
+            scope: prefilter.scope ?? 'candidates',
           };
         } else {
           llmInfo = result;

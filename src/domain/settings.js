@@ -15,7 +15,9 @@ export const DEFAULT_SETTINGS = {
     // 调用预算:按字符打包 + 请求次数兜底,不再「每条请求判几条轨迹」。
     llmCharBudget: 30000,
     llmMaxCalls: 12,
-    // 本地预筛:最多送多少组、多少天算统计异常。
+    // 判定范围:candidates 只判疑点;all 全量送模型(慢但覆盖 100%)。
+    llmScope: 'candidates',
+    // 本地预筛:最多送多少组(0=不限)、多少天算统计异常。
     llmMaxCandidates: 400,
     llmOutlierMinDays: 25,
     llmOutlierRatio: 2.5,
