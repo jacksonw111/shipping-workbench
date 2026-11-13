@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN" data-embed="0">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>船期工作台</title>
+    <link rel="stylesheet" href="/shipping-workbench/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail">
+        <div class="rail-brand">
+          <span class="rail-mark" aria-hidden="true">⛴</span>
+          <span class="rail-name">船期工作台</span>
+        </div>
+        <nav class="rail-nav" id="nav" aria-label="工作台导航"></nav>
+        <div class="rail-foot" id="rail-foot"></div>
+      </aside>
+      <main class="main" id="main"></main>
+    </div>
+    <div class="toast-stack" id="toasts" role="status" aria-live="polite"></div>
+    <script type="module" src="/shipping-workbench/app.js"></script>
+  </body>
+</html>

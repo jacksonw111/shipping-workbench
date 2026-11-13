@@ -1,0 +1,5 @@
+# 船期工作台 bundle:向 profile 根插入一条插件入口。
+# 作为 bundle 安装时由 loader 自动套用,不需要用户手改 profile 的 patch 文件。
+- insert:
+    - id: shipping-workbench
+      name: shipping-workbench

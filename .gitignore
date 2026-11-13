@@ -1,0 +1,5 @@
+node_modules/
+.verify-data/
+screenshots/
+*.tgz
+.DS_Store

@@ -1,0 +1,42 @@
+{
+  "name": "shipping-workbench",
+  "version": "0.10.0",
+  "private": false,
+  "description": "DeepSeek Harness 插件:船期数据工作台(公众号更新 / 轨迹检测 / 船期表对比 / 邮件附件)",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/",
+    "ui/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "pdfjs-dist": "^6.5.438",
+    "xlsx": "0.18.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jacksonw111/shipping-workbench.git"
+  },
+  "homepage": "https://github.com/jacksonw111/shipping-workbench"
+}
