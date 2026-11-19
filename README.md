@@ -22,6 +22,14 @@
 github:<你的账号>/shipping-workbench
 ```
 
+**Windows 注意**:用 `github:` 安装需要本机有 `git`。没有会报
+`[ERR_PNPM_GIT_RESOLVE_FAILED] ... 'git' 不是内部或外部命令`。两条路:
+
+1. 装 Git for Windows(`winget install --id Git.Git -e` 或 https://git-scm.com/download/win),
+   **重开 PowerShell 确认 `git --version` 能跑,再重启 DeepSeek Harness**,然后重试安装;
+2. 不想装 git:下载仓库 zip(`https://github.com/jacksonw111/shipping-workbench/archive/refs/heads/main.zip`),
+   解压后到 **设置 → 插件 → 添加插件** 选这个目录(包根目录有 `package.json`),不需要 git。
+
 **方式二(本地)**:终端里执行
 
 ```bash
