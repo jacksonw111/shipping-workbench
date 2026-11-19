@@ -23,7 +23,14 @@ export class WechatService {
   }
 
   listAccounts() {
-    return this.db.listAccounts();
+    const now = Date.now();
+    const sogouBlockedUntil = Number(this.db.getFlag('wechat:sogouBlockedUntil') ?? 0);
+    const albumBlockedUntil = Number(this.db.getFlag('wechat:albumBlockedUntil') ?? 0);
+    return this.db.listAccounts().map((account) => ({
+      ...account,
+      sogouBlockedUntil: sogouBlockedUntil > now ? sogouBlockedUntil : 0,
+      albumBlockedUntil: albumBlockedUntil > now ? albumBlockedUntil : 0,
+    }));
   }
 
   getAccount(id) {
@@ -169,7 +176,13 @@ export class WechatService {
     return this.db.getArticle(accountId, key);
   }
 
-  /** Collect one account through every usable channel. */
+  /**
+   * 采集一个公众号。
+   *
+   * 通道分工:合集是主通道;搜狗只在「没有合集 / 合集断了很久」时低频补一次。
+   * 风控(429)是**冷却**而不是失败:记 warning、落一个跨进程的冷却时间,下一轮跳过,
+   * 不能让搜狗把整个账号判成 failed。
+   */
   async collect(accountId, { onProgress = () => {} } = {}) {
     if (this.running.has(accountId)) throw new HttpError(409, '该公众号正在采集中');
     const account = this.getAccount(accountId);
@@ -178,49 +191,86 @@ export class WechatService {
     const startedAt = Date.now();
     const settings = this.settings.read().wechat;
     const known = this.db.articleKeys(account.id);
-    // 还没回填过的号不套回填窗口:否则合集里最新一篇超过 5 天就一篇都采不到。
     const firstRun = !account.backfilled;
+    const now = Date.now();
+    const warnings = [];
+    const errors = [];
     let added = 0;
     let attempted = 0;
     const channels = { album: 0, sogou: 0 };
     let albumAdded = 0;
-    const errors = [];
     try {
+      // ---- 合集(主通道) ----
+      const albumBlockedUntil = Number(this.db.getFlag('wechat:albumBlockedUntil') ?? 0);
       if (account.albumId) {
-        attempted += 1;
-        try {
-          const count = await this.collectAlbum(account, settings, known, onProgress, { firstRun });
-          channels.album = count;
-          albumAdded = count;
-          added += count;
-        } catch (error) {
-          if (error instanceof HttpError && error.status === 429) throw error;
-          errors.push(`合集:${error.message}`);
+        if (now < albumBlockedUntil) {
+          warnings.push(`合集:风控冷却中,${this.#untilText(albumBlockedUntil)}再试`);
+        } else {
+          attempted += 1;
+          try {
+            const result = await this.collectAlbum(account, settings, known, onProgress, { firstRun });
+            channels.album = result.added;
+            albumAdded = result.added;
+            added += result.added;
+            warnings.push(...result.warnings);
+          } catch (error) {
+            if (error instanceof HttpError && error.status === 429) {
+              const minutes = Math.max(1, Number(settings.albumCooldownMinutes) || 30);
+              this.db.setFlag('wechat:albumBlockedUntil', String(Date.now() + minutes * 60_000));
+              warnings.push(`合集:${error.message}`);
+            } else {
+              errors.push(`合集:${error.message}`);
+            }
+          }
         }
       }
-      const needSogou = settings.sogouEnabled !== false && (!account.albumId || (albumAdded === 0 && !firstRun));
-      if (needSogou) {
-        attempted += 1;
-        try {
-          const count = await this.collectSogou(account, settings, known, onProgress);
-          channels.sogou = count;
-          added += count;
-        } catch (error) {
-          errors.push(`搜狗:${error.message}`);
-          if (error instanceof HttpError && error.status === 429) throw error;
+
+      // ---- 搜狗(补充通道) ----
+      const fallbackHours = Math.max(1, Number(settings.sogouFallbackHours) || 24);
+      const latestAt = this.db.latestArticleAt(account.id);
+      const stale = !latestAt || now - latestAt >= fallbackHours * 3_600_000;
+      const fallbackDue = !account.albumId || (albumAdded === 0 && !firstRun && stale);
+      const sogouBlockedUntil = Number(this.db.getFlag('wechat:sogouBlockedUntil') ?? 0);
+      if (settings.sogouEnabled !== false && fallbackDue) {
+        if (now < sogouBlockedUntil) {
+          warnings.push(`搜狗:冷却中,${this.#untilText(sogouBlockedUntil)}再试`);
+        } else {
+          attempted += 1;
+          try {
+            const count = await this.collectSogou(account, settings, known, onProgress);
+            channels.sogou = count;
+            added += count;
+          } catch (error) {
+            if (error instanceof HttpError && error.status === 429) {
+              const hours = Math.max(1, Number(settings.sogouCooldownHours) || 6);
+              this.db.setFlag('wechat:sogouBlockedUntil', String(Date.now() + hours * 3_600_000));
+              warnings.push(`搜狗:${error.message}`);
+            } else {
+              errors.push(`搜狗:${error.message}`);
+            }
+          }
         }
       }
+
+      // 所有真正尝试过的通道都硬失败,才算这次采集失败。
       if (attempted > 0 && errors.length === attempted) {
         throw new HttpError(502, errors.join(';'));
       }
+      const status = errors.length > 0 ? 'partial' : 'ok';
       this.db.updateAccount(account.id, {
         lastCollectAt: new Date().toISOString(),
-        lastError: errors.length ? errors.join(';') : null,
-        lastStatus: added > 0 ? 'ok' : errors.length ? 'partial' : 'ok',
-        // 只要这一轮没被风控打断,就算回填完成(合集翻完、该收的都收了)。
-        backfilled: firstRun ? true : account.backfilled,
+        lastError: [...errors, ...warnings].join(';') || null,
+        lastStatus: status,
+        // 合集翻过一轮就算回填完成;风控冷却不影响这个判断。
+        backfilled: firstRun && attempted > 0 ? true : account.backfilled,
       });
-      return { added, channels, durationMs: Date.now() - startedAt, warnings: errors };
+      return {
+        added,
+        channels,
+        durationMs: Date.now() - startedAt,
+        warnings,
+        errors,
+      };
     } catch (error) {
       this.db.updateAccount(account.id, {
         lastCollectAt: new Date().toISOString(),
@@ -234,21 +284,47 @@ export class WechatService {
     }
   }
 
+  /** 冷却截止时间 → 「约 N 分钟后」,给人看。 */
+  #untilText(untilMs) {
+    const minutes = Math.max(1, Math.ceil((Number(untilMs) - Date.now()) / 60_000));
+    return `约 ${minutes} 分钟后`;
+  }
+
+  /** 轻量重试:网络抖动/502 才重试,风控(429)立刻抛。 */
+  async #retry(work, attempts = 2) {
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return await work();
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 429) throw error;
+        lastError = error;
+        if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 1200 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+
   /** 合集通道:按合集翻页,只收回填窗口内的新文章。 */
   async collectAlbum(account, settings, known, onProgress, { firstRun = false } = {}) {
     const since = Date.now() - settings.backfillDays * 86400_000;
     const maxFirstRun = Math.max(1, Number(settings.firstRunMaxArticles) || 60);
+    const warnings = [];
     let added = 0;
     let beginMsgId = '';
     let beginItemIdx = '';
     let done = false;
     for (let page = 0; page < settings.maxPages && !done; page += 1) {
-      const result = await fetchAlbumPage({
-        biz: account.biz,
-        albumId: account.albumId,
-        beginMsgId,
-        beginItemIdx,
-      });
+      const result = await this.#retry(
+        () =>
+          fetchAlbumPage({
+            biz: account.biz,
+            albumId: account.albumId,
+            beginMsgId,
+            beginItemIdx,
+          }),
+        2,
+      );
       if (result.articles.length === 0) break;
       for (const item of result.articles) {
         if (known.has(item.key)) continue;
@@ -261,7 +337,15 @@ export class WechatService {
           break;
         }
         onProgress({ phase: 'article', title: item.title });
-        const parsed = await fetchArticle(item.url, { intervalMs: settings.requestIntervalMs });
+        let parsed;
+        try {
+          parsed = await fetchArticle(item.url, { intervalMs: settings.requestIntervalMs });
+        } catch (error) {
+          // 单篇失败(被风控/网络抖动)只记 warning,不影响这一轮其它文章。
+          warnings.push(`文章「${item.title || item.key}」抓取失败:${error.message}`);
+          if (error instanceof HttpError && error.status === 429) break;
+          continue;
+        }
         this.storeArticle(account, {
           key: item.key,
           title: parsed.title || item.title,
@@ -280,13 +364,9 @@ export class WechatService {
       beginMsgId = last.msgid;
       beginItemIdx = last.itemidx;
     }
-    return added;
+    return { added, warnings };
   }
 
-  /**
-   * 搜狗通道:按号名搜文章,打开正文后用 `var biz` 过滤,只留这个号的。
-   * 搜狗结果是「搜得到的」而不是完整历史,所以不受回填窗口限制。
-   */
   async collectSogou(account, settings, known, onProgress) {
     const limit = Math.max(1, Number(settings.sogouMaxArticles) || 12);
     const keywords = [...new Set([account.name, account.name.replace(/\s+/g, '')])].filter(Boolean);

@@ -321,6 +321,14 @@ export class WorkbenchDb {
       );
   }
 
+  /** 某账号最新一篇文章的发布时间(毫秒);没有文章返回 0。 */
+  latestArticleAt(accountId) {
+    const row = this.db
+      .prepare('select max(published_at) as at from mp_article where account_id = ?')
+      .get(accountId);
+    return Number(row?.at ?? 0);
+  }
+
   articleKeys(accountId) {
     return new Set(
       this.db

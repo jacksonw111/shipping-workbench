@@ -35,6 +35,11 @@ export const DEFAULT_SETTINGS = {
     firstRunMaxArticles: 60,
     sogouEnabled: true,
     sogouMaxArticles: 12,
+    // 搜狗只是补充通道:合集断更超过 N 小时才试一次;被风控后冷却 N 小时。
+    sogouFallbackHours: 24,
+    sogouCooldownHours: 6,
+    // 合集命中风控后,全局暂停 N 分钟,避免三个号轮流去撞。
+    albumCooldownMinutes: 30,
     lookupProbeCount: 8,
   },
   // 跟随更新的源;默认就是本仓库的 main 分支。

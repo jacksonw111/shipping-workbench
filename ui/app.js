@@ -377,13 +377,15 @@ function renderAccountTasks(view) {
                         <td>${account.intervalMinutes} 分</td>
                         <td>${account.lastCollectAt ? relative(new Date(account.lastCollectAt).getTime()) : '—'}</td>
                         <td>${
-                          account.lastError
-                            ? `<span class="chip chip-danger" title="${esc(account.lastError)}">${
-                                account.lastStatus === 'partial' ? '部分失败' : '失败'
-                              }</span>`
-                            : account.enabled
-                              ? '<span class="chip chip-ok">启用</span>'
-                              : '<span class="chip">停用</span>'
+                          account.lastStatus === 'failed'
+                            ? `<span class="chip chip-danger" title="${esc(account.lastError ?? '')}">失败</span>`
+                            : account.lastStatus === 'partial'
+                              ? `<span class="chip chip-warn" title="${esc(account.lastError ?? '')}">部分失败</span>`
+                              : account.lastError
+                                ? `<span class="chip chip-ok" title="${esc(account.lastError)}">正常(有提示)</span>`
+                                : account.enabled
+                                  ? '<span class="chip chip-ok">启用</span>'
+                                  : '<span class="chip">停用</span>'
                         }</td>
                         <td>
                           <div class="row">
@@ -2108,6 +2110,9 @@ const SETTING_FIELDS = {
     ['backfillDays', '回填天数', 'number'],
     ['firstRunMaxArticles', '首次最多回填篇数', 'number'],
     ['sogouMaxArticles', '搜狗每次最多篇数', 'number'],
+    ['sogouFallbackHours', '合集断更多久才试搜狗(小时)', 'number'],
+    ['sogouCooldownHours', '搜狗风控冷却(小时)', 'number'],
+    ['albumCooldownMinutes', '合集风控冷却(分钟)', 'number'],
   ],
   track: [
     ['congestionMinWaitDays', '塞港冲突:最少等泊天数', 'number'],
