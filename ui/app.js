@@ -948,7 +948,15 @@ function renderTrack(view) {
                       .map(
                         (run) => `<tr>
                           <td>${fmtTime(run.createdAt)}</td>
-                          <td class="strong">${esc(run.title)}</td>
+                          <td class="strong">${esc(run.title)}
+                            ${
+                              run.inputs?.oldRef?.date || run.inputs?.newRef?.date
+                                ? `<div class="field-note">${fmtDate(run.inputs.oldRef?.date)} → ${fmtDate(
+                                    run.inputs.newRef?.date,
+                                  )}</div>`
+                                : ''
+                            }
+                          </td>
                           <td class="num">${run.stats?.flagged ?? 0}/${run.stats?.checked ?? 0}</td>
                           <td class="num">${run.stats?.model?.checked ?? 0}</td>
                           <td style="text-align:right"><button class="btn btn-ghost" data-open-track="${run.id}">打开</button></td>
@@ -1212,6 +1220,11 @@ function renderSchedule(view) {
         <h1 class="page-title">船期对比</h1>
         <div class="page-sub">
           <span class="mono">${esc(result.oldName)}</span> → <span class="mono">${esc(result.newName)}</span>
+          ${
+            result.oldRef?.date || result.newRef?.date
+              ? `<span class="chip">${fmtDate(result.oldRef?.date)} → ${fmtDate(result.newRef?.date)}</span>`
+              : ''
+          }
           ${result.carrierName ? `<span class="chip chip-new">${esc(result.carrierName)}</span>` : ''}
           <button class="btn btn-ghost" id="schedule-recompare" ${
             state.schedule.recomparing ? 'disabled' : ''

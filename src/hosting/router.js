@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpError, readBody, sendError, sendJson, parseMultipart } from '../util/http-util.js';
 import { ingestMailAttachments } from '../domain/mail-ingest.js';
-import { buildSchedulePairs } from '../domain/schedule-pairs.js';
+import { buildSchedulePairs, matchRunForPair } from '../domain/schedule-pairs.js';
+import { createHash } from 'node:crypto';
 import { BATCH_SYSTEM_PROMPT, trackSystemPrompt } from '../domain/llm.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -292,12 +293,12 @@ async function handleApi(req, res, url, route, services) {
     }
     // 邮件系列里新旧两份附件的配对结果:一行 = 旧附件 + 新附件 + 邮件 + 已有对比。
     if (rest[0] === 'pairs' && method === 'GET') {
-      return sendJson(res, 200, schedulePairs({ mail, db }));
+      return sendJson(res, 200, schedulePairs({ mail, db, schedule }));
     }
     // 对某一条配对现场跑一次对比(附件字节从邮件库读)。
     if (rest[0] === 'pairs' && rest[1] === 'compare' && method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      const pairs = schedulePairs({ mail, db });
+      const pairs = schedulePairs({ mail, db, schedule });
       const row = pairs.rows.find((item) => item.key === body.key);
       if (!row) throw new HttpError(404, '这条对比任务不存在,刷新后再试');
       if (row.kind !== 'excel' && row.kind !== 'pdf') {
@@ -313,8 +314,10 @@ async function handleApi(req, res, url, route, services) {
         carrierId: row.carrierId ?? '',
         carrierName: row.carrierName ?? '',
         source: 'mail',
+        oldRef: row.old,
+        newRef: row.new,
       });
-      return sendJson(res, 200, { result, pairs: schedulePairs({ mail, db }) });
+      return sendJson(res, 200, { result, pairs: schedulePairs({ mail, db, schedule }) });
     }
     if (rest[0] === 'versions' && rest[1] === 'compare' && method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
@@ -440,12 +443,51 @@ async function handleApi(req, res, url, route, services) {
   notFound(res);
 }
 
-/** 邮件索引 + 船东配置 + 已有对比记录 → 船期对比任务行。 */
-function schedulePairs({ mail, db }) {
+/**
+ * 邮件索引 + 船东配置 + 已有对比记录 → 船期对比任务行。
+ *
+ * 同名附件(如 PANDA 每天都是 rasp.pdf)不能只按文件名认结果,这里读两边文件算哈希,
+ * 只有内容一致才算「这条配对已经有结果」。
+ */
+function schedulePairs({ mail, db, schedule }) {
+  const runs = db.listRuns({ kind: 'schedule', limit: 500 }).items;
+  const hashCache = new Map();
+  const sha1 = (data) => createHash('sha1').update(data).digest('hex');
+  const attachmentHash = (ref) => {
+    try {
+      return sha1(mail.readAttachment(ref.uid, ref.attachmentId).data);
+    } catch {
+      return '';
+    }
+  };
+  const hashOf = (run) => {
+    if (hashCache.has(run.id)) return hashCache.get(run.id);
+    let value = { old: '', new: '' };
+    try {
+      const dir = schedule.runDir(run.id);
+      const files = fs.readdirSync(dir);
+      const oldFile = files.find((name) => name.startsWith('old-'));
+      const newFile = files.find((name) => name.startsWith('new-'));
+      value = {
+        old: oldFile ? sha1(fs.readFileSync(path.join(dir, oldFile))) : '',
+        new: newFile ? sha1(fs.readFileSync(path.join(dir, newFile))) : '',
+      };
+    } catch {
+      // 目录/文件被清理过的老记录:留空,走文件名 + 日期兜底。
+    }
+    hashCache.set(run.id, value);
+    return value;
+  };
   return buildSchedulePairs({
     messages: mail.listMessages(),
     carriers: db.listCarriers(),
-    runs: db.listRuns({ kind: 'schedule', limit: 500 }).items,
+    runs,
+    matchRun: (row) =>
+      matchRunForPair(row, runs, {
+        oldHash: attachmentHash(row.old),
+        newHash: attachmentHash(row.new),
+        hashOf,
+      }),
   });
 }
 

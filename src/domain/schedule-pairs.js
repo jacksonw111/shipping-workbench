@@ -69,7 +69,7 @@ function baseName(name) {
  * 记录里的 oldName/newName 允许和邮件里的新旧顺序相反(用户可能是反着传的),
  * 两个方向都算命中;同一对有多条时取最新的一条(runs 由 listRuns 按时间倒序给出)。
  */
-export function findRunForPair(runs, oldName, newName) {
+export function findRunForPair(runs, oldName, newName, { notBefore = 0 } = {}) {
   const wantedOld = baseName(oldName);
   const wantedNew = baseName(newName);
   if (!wantedOld || !wantedNew) return null;
@@ -80,9 +80,54 @@ export function findRunForPair(runs, oldName, newName) {
     if (!runOld || !runNew) continue;
     const same = runOld === wantedOld && runNew === wantedNew;
     const reversed = runOld === wantedNew && runNew === wantedOld;
-    if (same || reversed) return run;
+    if (!same && !reversed) continue;
+    // 日期守卫:对比不可能发生在附件到达之前。同名附件(如每天都是 rasp.pdf)
+    // 单靠文件名会把别的日子的结果错配过来。
+    if (notBefore && timeOf(run.createdAt) < timeOf(notBefore)) continue;
+    return run;
   }
   return null;
+}
+
+/**
+ * 精确匹配一份「旧 → 新」配对对应的历史对比记录。
+ *
+ * 文件名相同不代表是同一份文件(PANDA 每天都是 rasp.pdf),所以先用**内容哈希**对;
+ * 哈希对不上就不认。没有哈希(更早的记录没留文件)时才退回「文件名 + 日期守卫」。
+ *
+ * @param hashOf - `(runId) => ({ old, new })`,由调用方读 run 目录里的源文件算出来
+ */
+export function matchRunForPair(row, runs, { oldHash = '', newHash = '', hashOf } = {}) {
+  if (!row?.old?.name || !row?.new?.name) return null;
+  const notBefore = Math.max(timeOf(row.old.date), timeOf(row.new.date));
+  const candidates = (runs ?? []).filter((run) => {
+    const inputs = run?.inputs ?? {};
+    const runOld = baseName(inputs.oldName);
+    const runNew = baseName(inputs.newName);
+    const wantedOld = baseName(row.old.name);
+    const wantedNew = baseName(row.new.name);
+    return (runOld === wantedOld && runNew === wantedNew) || (runOld === wantedNew && runNew === wantedOld);
+  });
+  if (candidates.length === 0) return null;
+
+  if (oldHash && newHash && typeof hashOf === 'function') {
+    for (const run of candidates) {
+      let hashes = null;
+      try {
+        hashes = hashOf(run);
+      } catch {
+        hashes = null;
+      }
+      if (!hashes?.old || !hashes?.new) continue;
+      const same = hashes.old === oldHash && hashes.new === newHash;
+      const reversed = hashes.old === newHash && hashes.new === oldHash;
+      if (same || reversed) return run;
+    }
+    // 有哈希但对不上 = 不是同一份文件,不要退化成按名字认。
+    return null;
+  }
+
+  return findRunForPair(candidates, row.old.name, row.new.name, { notBefore });
 }
 
 function kindOf(filename) {
@@ -126,7 +171,7 @@ function candidateOf(message, attachment) {
  *   - `rows`:每个「至少两封不同邮件」的系列一行,按新版邮件时间倒序;字段见 README/契约。
  *   - `unpaired`:只有一封的系列摘要 `{ count, items }`,给 UI 做「还有 N 个系列只有单版」的提示。
  */
-export function buildSchedulePairs({ messages = [], carriers = [], runs = [] } = {}) {
+export function buildSchedulePairs({ messages = [], carriers = [], runs = [], matchRun } = {}) {
   // 先按邮件时间升序排好,后面取「最近两封」就只看数组尾部。
   const ordered = [...(messages ?? [])]
     .filter(Boolean)
@@ -180,7 +225,17 @@ export function buildSchedulePairs({ messages = [], carriers = [], runs = [] } =
       filename: newItem.name,
     });
     const kind = kindOf(newItem.name);
-    const run = findRunForPair(runs, oldItem.name, newItem.name);
+    const run = typeof matchRun === 'function'
+      ? matchRun(
+          {
+            old: { uid: oldItem.uid, attachmentId: oldItem.attachmentId, name: oldItem.name, date: isoOf(oldItem.message.date) },
+            new: { uid: newItem.uid, attachmentId: newItem.attachmentId, name: newItem.name, date: isoOf(newItem.message.date) },
+          },
+          runs,
+        )
+      : findRunForPair(runs, oldItem.name, newItem.name, {
+          notBefore: Math.max(timeOf(isoOf(oldItem.message.date)), timeOf(isoOf(newItem.message.date))),
+        });
     let status;
     let reason = '';
     if (run) {

@@ -7,6 +7,7 @@ import {
   ATTACHMENT_EXTENSIONS,
   buildSchedulePairs,
   findRunForPair,
+  matchRunForPair,
   normalizeAttachmentName,
   normalizeSubject,
 } from '../src/domain/schedule-pairs.js';
@@ -259,4 +260,48 @@ test('compareVersions:船东不存在报 404', async () => {
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('同名附件按内容哈希认结果:哈希对不上就不算已对比', () => {
+  const runs = [
+    { id: 'r-old', inputs: { oldName: 'rasp.pdf', newName: 'rasp.pdf' }, createdAt: '2026-11-12T00:00:00Z' },
+  ];
+  const row = {
+    old: { name: 'rasp.pdf', date: '2026-11-17T01:00:00Z' },
+    new: { name: 'rasp.pdf', date: '2026-11-18T01:00:00Z' },
+  };
+  // 哈希不同 → 不是同一份文件,不能认成已对比
+  assert.equal(
+    matchRunForPair(row, runs, { oldHash: 'aaa', newHash: 'bbb', hashOf: () => ({ old: 'ccc', new: 'ddd' }) }),
+    null,
+  );
+  // 哈希一致 → 认
+  const hit = matchRunForPair(row, runs, { oldHash: 'aaa', newHash: 'bbb', hashOf: () => ({ old: 'aaa', new: 'bbb' }) });
+  assert.equal(hit.id, 'r-old');
+});
+
+test('没有哈希的老记录:文件名 + 日期守卫,不能早于附件到达', () => {
+  const oldRun = { id: 'r-early', inputs: { oldName: 'rasp.pdf', newName: 'rasp.pdf' }, createdAt: '2026-11-12T00:00:00Z' };
+  const row = {
+    old: { name: 'rasp.pdf', date: '2026-11-17T01:00:00Z' },
+    new: { name: 'rasp.pdf', date: '2026-11-18T01:00:00Z' },
+  };
+  assert.equal(matchRunForPair(row, [oldRun], {}), null, '11-12 的结果不可能是 11-18 附件比的');
+
+  const freshRun = { id: 'r-new', inputs: { oldName: 'rasp.pdf', newName: 'rasp.pdf' }, createdAt: '2026-11-19T00:30:00Z' };
+  assert.equal(matchRunForPair(row, [oldRun, freshRun], {})?.id, 'r-new');
+});
+
+test('buildSchedulePairs 的默认匹配也带日期守卫', () => {
+  const messages = [
+    mail('1', 'PANDA 船期表', '2026-11-17T01:00:00Z', 'rasp.pdf'),
+    mail('2', 'PANDA 船期表', '2026-11-18T01:00:00Z', 'rasp.pdf'),
+  ];
+  const runs = [
+    { id: 'r-early', inputs: { oldName: 'rasp.pdf', newName: 'rasp.pdf' }, createdAt: '2026-11-12T00:00:00Z' },
+  ];
+  const { rows } = buildSchedulePairs({ messages, carriers: CARRIERS, runs });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, 'ready', '旧日期的同名结果不能被认成这行已对比');
+  assert.equal(rows[0].runId, '');
 });

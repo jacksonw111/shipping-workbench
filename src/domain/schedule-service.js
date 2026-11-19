@@ -51,6 +51,9 @@ export class ScheduleService {
     source = 'upload',
     mapping = null,
     wantDigest = true,
+    // 邮件来源引用:日后靠它精确找回「这行配对对应哪次对比」。
+    oldRef = null,
+    newRef = null,
   }) {
     const startedAt = Date.now();
     const carrier = carrierId ? this.db.getCarrier(carrierId) : null;
@@ -122,6 +125,8 @@ export class ScheduleService {
       generatedAt: result.generatedAt,
       oldName: oldName || '旧版',
       newName: newName || '新版',
+      oldRef: oldRef ?? null,
+      newRef: newRef ?? null,
       carrierId: carrier?.id ?? '',
       carrierName: carrier?.name ?? carrierName,
       today: result.today,
@@ -167,7 +172,7 @@ export class ScheduleService {
       kind: 'schedule',
       title: `${carrier ? `${carrier.name} · ` : ''}${record.oldName} → ${record.newName}`,
       source,
-      inputs: { oldName, newName, keys: keyList, dateColumn, carrierId: carrier?.id ?? '' },
+      inputs: { oldName, newName, keys: keyList, dateColumn, carrierId: carrier?.id ?? '', oldRef, newRef },
       stats: record.stats,
       detail: {
         sheets: record.sheets.map((sheet) => sheet.name),
