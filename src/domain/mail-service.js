@@ -33,6 +33,20 @@ function imapDate(date) {
 }
 
 /** 邮箱读取:自动识别服务商端点、IMAP / STARTTLS、附件提取。 */
+/**
+ * 只挑「还没入库」的 UID。
+ *
+ * 之前每次抓取都把最近 N 封整封重下(实测 40 封 = 15MB / 16 秒),
+ * 而真正新的通常只有 0-3 封。搜索本身很便宜(几十毫秒),贵的是 BODY 下载。
+ */
+export function newMessageUids(uids = [], existing = new Set(), cap = 40) {
+  const limit = Math.max(1, Number(cap) || 40);
+  return (uids ?? [])
+    .map((uid) => String(uid ?? '').trim())
+    .filter((uid) => uid && !existing.has(uid))
+    .slice(-limit);
+}
+
 export class MailService {
   constructor(home, settings) {
     this.home = home;
@@ -263,26 +277,64 @@ export class MailService {
     return path.join(this.attachDir, slugify(messageUid), slugify(attachmentId));
   }
 
-  async fetchRecent({ limit } = {}) {
+  /**
+   * 拉取邮件(增量 + 逐封回调)。
+   *
+   * 先用便宜的 SEARCH 拿 UID 列表,只对「还没入库」的邮件下载整封正文;
+   * 每入库一封就调用一次 `onMessage`,界面可以「拉一封显示一封」,不必等全部完成。
+   */
+  async fetchRecent({ limit, onMessage } = {}) {
     const config = this.config();
     const cap = Math.max(1, Math.min(200, Number(limit) || config.maxMessages || 40));
     const since = new Date(Date.now() - (Number(config.lookbackDays) || 30) * 86400_000);
+    const timings = { connect: 0, login: 0, select: 0, search: 0, fetch: 0, store: 0 };
+    let phaseAt = Date.now();
+    const mark = (name) => {
+      timings[name] = (timings[name] ?? 0) + (Date.now() - phaseAt);
+      phaseAt = Date.now();
+    };
     const { client, endpoint } = await this.connectClient();
+    mark('connect');
     try {
       await this.login(client);
+      mark('login');
       await client.select(config.folder || 'INBOX');
+      mark('select');
       const uids = await client.uidSearch(`SINCE ${imapDate(since)}`);
-      const wanted = uids.slice(-cap);
-      const messages = await client.uidFetch(wanted);
+      mark('search');
+      const existing = new Set(this.listMessages().map((message) => String(message.uid)));
+      const wanted = newMessageUids(uids, existing, cap);
       const stored = [];
-      for (const message of messages) {
-        const record = this.storeMessage(message.raw, message.uid);
-        if (record) stored.push(record);
+      // 逐封下载:多几个往返,换来第一封立刻可见。
+      for (const uid of wanted) {
+        const messages = await client.uidFetch([uid]);
+        mark('fetch');
+        const [record] = this.storeMessages(messages);
+        mark('store');
+        if (!record) continue;
+        stored.push(record);
+        if (typeof onMessage === 'function') {
+          try {
+            onMessage(record);
+          } catch {
+            // 回调失败不影响入库
+          }
+        }
       }
       // 早期版本可能写进过 uid 为空的记录,一次清掉。
       this.dropInvalidMessages();
       await client.logout();
-      return { fetched: stored.length, endpoint, messages: this.listMessages().slice(0, cap) };
+      timings.total = Object.values(timings).reduce((sum, value) => sum + value, 0);
+      return {
+        fetched: stored.length,
+        scanned: uids.length,
+        skipped: Math.max(0, uids.length - wanted.length),
+        endpoint,
+        messages: this.listMessages().slice(0, Math.max(cap, stored.length)),
+        // 只把「这一轮新入库的」交给后续附件识别,避免对历史附件重复读盘/重复对比。
+        newMessages: stored,
+        timings,
+      };
     } catch (error) {
       client.socket?.destroy();
       if (error instanceof HttpError) throw error;
@@ -290,7 +342,37 @@ export class MailService {
     }
   }
 
+  /**
+   * 批量入库:附件/正文逐个写,索引只重写一次。
+   * 之前每封都 readJson + 写整个 messages.json,40 封就是 40 次全量重写。
+   */
+  storeMessages(list = []) {
+    const items = (list ?? []).filter((item) => item && item.uid !== null && item.uid !== undefined && item.uid !== '');
+    if (items.length === 0) return [];
+    const byUid = new Map(
+      readJson(this.indexFile, [])
+        .filter((message) => message.uid && message.uid !== 'null')
+        .map((message) => [String(message.uid), message]),
+    );
+    const stored = [];
+    for (const item of items) {
+      const record = this.buildRecord(item.raw, item.uid);
+      if (!record) continue;
+      byUid.set(String(item.uid), record);
+      stored.push(record);
+    }
+    const index = [...byUid.values()].sort((left, right) => (right.date ?? 0) - (left.date ?? 0));
+    fs.writeFileSync(this.indexFile, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
+    return stored;
+  }
+
   storeMessage(raw, uid) {
+    const [record] = this.storeMessages([{ raw, uid }]);
+    return record ?? null;
+  }
+
+  /** 单封邮件落盘(附件 + 正文 + 索引记录),不写索引文件。 */
+  buildRecord(raw, uid) {
     if (uid === null || uid === undefined || uid === '') return null;
     const parsed = parseMime(raw);
     const headerText = splitHeaderBody(raw).header;
@@ -335,9 +417,6 @@ export class MailService {
       hasBody: Boolean(htmlBody || textBody),
       fetchedAt: new Date().toISOString(),
     };
-    const index = readJson(this.indexFile, []).filter((message) => String(message.uid) !== String(uid));
-    index.push(record);
-    fs.writeFileSync(this.indexFile, `${JSON.stringify(index, null, 2)}\n`, { mode: 0o600 });
     return record;
   }
 

@@ -53,6 +53,7 @@ const state = {
     newFile: null,
     busy: false,
     fetchingMail: false,
+    fetchProgress: null,
     busyKey: '',
     recomparing: false,
     pairs: { items: [], total: 0, loading: false, loaded: false },
@@ -69,6 +70,7 @@ const state = {
     openUid: null,
     detail: null,
     list: { q: '', offset: 0, limit: 10, items: [], total: 0, loading: false },
+    progress: null,
   },
   update: { checking: false, applying: false, info: null, error: '' },
   prompts: { loaded: false, loading: false, track: { default: '', override: '', system: '' }, draft: null, saving: false },
@@ -115,6 +117,65 @@ async function api(path, options = {}) {
     throw error;
   }
   return contentType.includes('application/json') ? response.json() : response;
+}
+
+/** 流式事件密集时合并渲染,避免一封一重绘把页面刷爆。 */
+let renderTimer = null;
+function renderSoon() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    render();
+  }, 120);
+}
+
+/**
+ * 逐行读取 NDJSON 响应。每条事件交给 onEvent,不必等整个请求结束。
+ */
+async function apiStream(path, body, onEvent) {
+  const response = await fetch(`${API}${path}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`;
+    try {
+      const data = await response.json();
+      if (data?.error) message = data.error;
+    } catch {
+      /* 保留状态码 */
+    }
+    throw new Error(message);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const text = line.trim();
+      if (!text) continue;
+      try {
+        onEvent(JSON.parse(text));
+      } catch {
+        // 半行/坏行跳过
+      }
+    }
+  }
+  const tail = buffer.trim();
+  if (tail) {
+    try {
+      onEvent(JSON.parse(tail));
+    } catch {
+      /* 忽略 */
+    }
+  }
 }
 
 function toast(message, kind = 'info') {
@@ -1263,6 +1324,11 @@ function renderSchedule(view) {
         <button class="btn btn-primary" id="mail-fetch" ${cursor.fetchingMail ? 'disabled' : ''}>${
           cursor.fetchingMail ? '<span class="spinner"></span> 拉取中' : '拉取邮件'
         }</button>
+        ${
+          cursor.fetchProgress
+            ? `<span class="field-note">扫描 ${cursor.fetchProgress.scanned} · 新增 ${cursor.fetchProgress.fetched} · 识别 ${cursor.fetchProgress.ingested}</span>`
+            : ''
+        }
       </div>
       <div class="table-scroll">
         <table class="table">
@@ -1421,20 +1487,32 @@ async function recompareRun() {
 
 async function fetchMailForPairs() {
   const cursor = state.schedule;
+  if (cursor.fetchingMail) return;
   cursor.fetchingMail = true;
+  cursor.fetchProgress = { scanned: 0, fetched: 0, ingested: 0 };
   render();
+  let failure = '';
   try {
-    const data = await api('/mail/fetch', { method: 'POST', body: JSON.stringify({ limit: 40 }) });
-    toast(`拉到 ${data.fetched ?? 0} 封邮件,识别 ${data.ingested?.length ?? 0} 个附件`, 'ok');
-    await refreshBoot();
-    cursor.pairs.loaded = false;
-    cursor.runs.loaded = false;
+    await apiStream('/mail/fetch/stream', { limit: 40 }, (event) => {
+      if (event.type === 'result') cursor.fetchProgress.scanned = event.scanned ?? 0;
+      if (event.type === 'message') cursor.fetchProgress.fetched += 1;
+      if (event.type === 'ingested') cursor.fetchProgress.ingested += 1;
+      if (event.type === 'error') failure = event.error || '拉取失败';
+      renderSoon();
+    });
   } catch (error) {
-    toast(error.message, 'error');
-  } finally {
-    cursor.fetchingMail = false;
-    render();
+    failure = error.message;
   }
+  const progress = cursor.fetchProgress;
+  cursor.fetchingMail = false;
+  cursor.fetchProgress = null;
+  cursor.pairs.loaded = false;
+  cursor.runs.loaded = false;
+  render();
+  if (failure) toast(failure, 'error');
+  else toast(`新增 ${progress?.fetched ?? 0} 封 · 识别 ${progress?.ingested ?? 0} 个附件`, 'ok');
+  await refreshBoot();
+  render();
 }
 
 async function runUploadCompare() {
@@ -1761,7 +1839,13 @@ function renderMail(view) {
           state.mail.busy ? '<span class="spinner"></span> 拉取中' : '拉取邮件'
         }</button>
         <span class="spacer"></span>
-        <span class="field-note">${esc(config.folder || 'INBOX')}</span>
+        <span class="field-note">${
+          state.mail.progress
+            ? `扫描 ${state.mail.progress.scanned} · 新增 ${state.mail.progress.fetched} · 已识别 ${
+                state.mail.progress.ingested
+              } · ${((Date.now() - state.mail.progress.startedAt) / 1000).toFixed(1)}s`
+            : esc(config.folder || 'INBOX')
+        }</span>
       </div>
       ${
         state.mail.smtp
@@ -1838,28 +1922,58 @@ function renderMail(view) {
   view.querySelector('#mail-test').addEventListener('click', () => mailAction('test', '/mail/test'));
   view.querySelector('#mail-smtp').addEventListener('click', () => mailAction('smtp', '/mail/smtp-check'));
   view.querySelector('#mail-detect').addEventListener('click', () => mailAction('detect', '/mail/detect'));
-  view.querySelector('#mail-fetch').addEventListener('click', async () => {
-    state.mail.busy = true;
-    render();
-    try {
-      const result = await api('/mail/fetch', { method: 'POST', body: JSON.stringify({ limit: 30 }) });
-      const ingested = (result.ingested ?? []).filter((item) => item.run || item.version);
-      toast(
-        `拉取 ${result.fetched} 封${ingested.length ? `;自动入库 ${ingested.length} 份船期表` : ''}`,
-        'ok',
-      );
-      state.mail.list.loaded = false;
-      state.schedule.runs.loaded = false;
-      await refreshBoot();
-    } catch (error) {
-      toast(error.message, 'error');
-    } finally {
-      state.mail.busy = false;
-      render();
-    }
-  });
+  view.querySelector('#mail-fetch').addEventListener('click', fetchMailStreaming);
   bindListControls(view, 'mail', cursor, loadMailList);
   if (!cursor.loaded && !cursor.loading) loadMailList();
+}
+
+/** 拉邮件:服务端逐封推送,界面收到一封就插一行。 */
+async function fetchMailStreaming() {
+  const cursor = state.mail;
+  if (cursor.busy) return;
+  cursor.busy = true;
+  cursor.progress = { fetched: 0, scanned: 0, ingested: 0, startedAt: Date.now() };
+  render();
+  let failure = '';
+  try {
+    await apiStream('/mail/fetch/stream', { limit: 30 }, (event) => {
+      if (event.type === 'message') {
+        const message = event.message;
+        cursor.progress.fetched += 1;
+        cursor.list.items = [message, ...(cursor.list.items ?? []).filter((item) => String(item.uid) !== String(message.uid))];
+        cursor.list.total = (cursor.list.total ?? 0) + 1;
+        renderSoon();
+      } else if (event.type === 'result') {
+        cursor.progress.scanned = event.scanned ?? cursor.progress.scanned;
+        renderSoon();
+      } else if (event.type === 'ingested') {
+        cursor.progress.ingested += 1;
+        renderSoon();
+      } else if (event.type === 'error') {
+        failure = event.error || '拉取失败';
+      }
+    });
+  } catch (error) {
+    failure = error.message;
+  }
+  const progress = cursor.progress;
+  cursor.progress = null;
+  cursor.busy = false;
+  cursor.list.loaded = false;
+  state.schedule.runs.loaded = false;
+  state.schedule.pairs.loaded = false;
+  render();
+  if (failure) toast(failure, 'error');
+  else
+    toast(
+      `新增 ${progress?.fetched ?? 0} 封 · 识别 ${progress?.ingested ?? 0} 个附件 · ${(
+        (Date.now() - (progress?.startedAt ?? Date.now())) /
+        1000
+      ).toFixed(1)}s`,
+      'ok',
+    );
+  await refreshBoot();
+  render();
 }
 
 async function mailAction(kind, path) {

@@ -422,6 +422,10 @@ async function handleApi(req, res, url, route, services) {
       if (!message) throw new HttpError(404, '邮件不存在');
       return sendJson(res, 200, { message, body: mail.readBody(rest[1]) });
     }
+    // 流式拉取:每入库一封就推一行 NDJSON,界面可以「拉一封显示一封」。
+    if (rest[0] === 'fetch' && rest[1] === 'stream' && method === 'POST') {
+      return streamMailFetch(req, res, { mail, db, schedule });
+    }
     if (rest[0] === 'fetch' && method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const result = await mail.fetchRecent({ limit: body.limit });
@@ -429,7 +433,8 @@ async function handleApi(req, res, url, route, services) {
       const ingested = await ingestMailAttachments({
         db,
         schedule,
-        messages: result.messages ?? [],
+        // 只处理这一轮新入库的邮件:历史附件已经识别过,重复读盘/重复对比没有意义。
+        messages: result.newMessages ?? result.messages ?? [],
         readAttachment: (uid, id) => mail.readAttachment(uid, id).data,
       });
       return sendJson(res, 200, { ...result, ingested, runs: schedule.listRuns({ limit: 20 }).items });
@@ -489,6 +494,59 @@ function schedulePairs({ mail, db, schedule }) {
         hashOf,
       }),
   });
+}
+
+
+/** NDJSON 流式拉邮件:message → result → ingested(逐条)→ done。 */
+async function streamMailFetch(req, res, { mail, db, schedule }) {
+  const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+  res.writeHead(200, {
+    'content-type': 'application/x-ndjson; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-accel-buffering': 'no',
+  });
+  const write = (event) => {
+    try {
+      res.write(`${JSON.stringify(event)}\n`);
+    } catch {
+      // 客户端断开就停止写,不抛
+    }
+  };
+  try {
+    write({ type: 'start', at: Date.now() });
+    const result = await mail.fetchRecent({
+      limit: body.limit,
+      // 逐封回调:前端收到就插一行。
+      onMessage: (message) => write({ type: 'message', message }),
+    });
+    write({
+      type: 'result',
+      fetched: result.fetched,
+      scanned: result.scanned,
+      skipped: result.skipped,
+      endpoint: result.endpoint,
+      timings: result.timings,
+    });
+    for (const message of result.newMessages ?? []) {
+      let items = [];
+      try {
+        items = await ingestMailAttachments({
+          db,
+          schedule,
+          messages: [message],
+          readAttachment: (uid, id) => mail.readAttachment(uid, id).data,
+        });
+      } catch (error) {
+        write({ type: 'warn', message: `${message.subject}: ${error.message}` });
+      }
+      for (const item of items) write({ type: 'ingested', item });
+    }
+    write({ type: 'done', fetched: result.fetched, timings: result.timings });
+  } catch (error) {
+    write({ type: 'error', error: error.message, status: error.status ?? 502 });
+  } finally {
+    res.end();
+  }
 }
 
 async function readMultipart(req) {

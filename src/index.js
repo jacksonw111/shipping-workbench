@@ -115,7 +115,7 @@ function startDailyMail({ db, mail, schedule, hour = 6, minute = 30, checkInterv
       await ingestMailAttachments({
         db,
         schedule,
-        messages: result.messages ?? [],
+        messages: result.newMessages ?? result.messages ?? [],
         readAttachment: (uid, id) => mail.readAttachment(uid, id).data,
       });
       db.setFlag(`mail:autoFetch:${today}`, new Date().toISOString());
