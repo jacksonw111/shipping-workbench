@@ -2175,6 +2175,9 @@ function attachmentButtons(message, file) {
   return `<div class="row" style="gap:6px">
     <span class="chip" title="${esc(file.filename)}">${esc(file.filename)} · ${bytes(file.size)}</span>
     ${matched ? `<span class="chip chip-new">${esc(matched.name)}</span>` : ''}
+    <a class="btn btn-ghost" href="${API}/mail/attachments/${encodeURIComponent(message.uid)}/${encodeURIComponent(
+      file.id,
+    )}" download="${esc(file.filename)}">下载</a>
     <button class="btn btn-ghost" data-attach="${message.uid}" data-file="${esc(file.id)}" data-mode="track"
       data-subject="${esc(message.subject)}" data-from="${esc(message.from)}">轨迹检测</button>
     <button class="btn btn-ghost" data-attach="${message.uid}" data-file="${esc(file.id)}" data-mode="old"

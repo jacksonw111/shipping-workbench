@@ -467,7 +467,7 @@ async function handleApi(req, res, url, route, services) {
     }
     if (rest[0] === 'attachments' && rest[1] && rest[2] && method === 'GET') {
       const { attachment, data } = mail.readAttachment(rest[1], rest[2]);
-      return sendDownload(res, data, attachment.filename);
+      return sendDownload(res, data, attachment.filename, attachment.contentType || contentTypeFor(attachment.filename));
     }
   }
 
@@ -582,9 +582,34 @@ async function readMultipart(req) {
   return parseMultipart(body, contentType);
 }
 
-function sendDownload(res, buffer, filename) {
+const DOWNLOAD_TYPES = {
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.xls': 'application/vnd.ms-excel',
+  '.csv': 'text/csv; charset=utf-8',
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.eml': 'message/rfc822',
+};
+
+/** 按扩展名给出下载用的 content-type;未知类型退回二进制流。 */
+export function contentTypeFor(filename, fallback = 'application/octet-stream') {
+  const match = /\.[A-Za-z0-9]+$/.exec(String(filename ?? ''));
+  if (!match) return fallback;
+  return DOWNLOAD_TYPES[match[0].toLowerCase()] ?? fallback;
+}
+
+function sendDownload(res, buffer, filename, contentType = '') {
   res.writeHead(200, {
-    'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    // 之前固定写 xlsx,下载 pdf/png 时类型是错的,浏览器会打不开。
+    'content-type': contentType || contentTypeFor(filename),
     'content-length': buffer.length,
     'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
     'cache-control': 'no-store',
