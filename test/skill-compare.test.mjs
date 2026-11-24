@@ -9,9 +9,13 @@ import { ScheduleService } from '../src/domain/schedule-service.js';
 import {
   buildSkillPrompt,
   parseSkillFile,
+  parseSkillPackage,
   parseSkillResult,
+  safeEntryPath,
+  skillMeta,
   workbookToText,
 } from '../src/domain/skill-compare.js';
+import { buildZip } from '../src/util/zip.js';
 
 function xlsx(rows) {
   const book = XLSX.utils.book_new();
@@ -165,4 +169,84 @@ test('服务层:没有模型时给可读的 400', async () => {
       }),
     (error) => error.status === 400 && /没有模型/.test(error.message),
   );
+});
+
+function skillZip() {
+  return buildZip([
+    { name: 'SKILL.md', data: SKILL },
+    { name: 'references/rule.md', data: '# 细则\n\n周数滚动的旧周不标删除。' },
+    { name: 'notes/readme.txt', data: '补充说明:ETD 以当地时间为准。' },
+    { name: 'scripts/panda_compare.py', data: 'print("compare")' },
+    { name: '../evil.md', data: '越界文件' },
+  ]);
+}
+
+test('技能包:zip 里找 SKILL.md,收参考资料,列脚本,过滤越界路径', async () => {
+  const pkg = await parseSkillPackage(skillZip(), 'panda-skill.zip');
+  assert.equal(pkg.kind, 'zip');
+  assert.equal(pkg.name, '简单船名航次对比');
+  assert.deepEqual(
+    pkg.references.map((item) => item.path).sort(),
+    ['notes/readme.txt', 'references/rule.md'],
+  );
+  assert.deepEqual(pkg.scripts, ['scripts/panda_compare.py']);
+  assert.ok(!pkg.files.some((file) => file.path.includes('evil')), '越界路径必须被丢掉');
+  assert.ok(pkg.files.some((file) => file.path === 'SKILL.md'));
+
+  const meta = skillMeta(pkg);
+  assert.equal(meta.kind, 'zip');
+  assert.equal(meta.referenceCount, 2);
+  assert.equal(meta.scripts.length, 1);
+  assert.ok(!('entries' in meta), '接口元信息不带 Buffer');
+});
+
+test('safeEntryPath:拒绝绝对路径与 ..', () => {
+  assert.equal(safeEntryPath('../a.md'), '');
+  assert.equal(safeEntryPath('/etc/passwd'), 'etc/passwd');
+  assert.equal(safeEntryPath('a/../../b.md'), '');
+  assert.equal(safeEntryPath('a//b/./c.md'), 'a/b/c.md');
+});
+
+test('技能包:没有 SKILL.md 报可读错误', async () => {
+  const zip = buildZip([{ name: 'readme.md', data: '# 没有技能文档' }]);
+  await assert.rejects(() => parseSkillPackage(zip, 'x.zip'), /缺少 SKILL\.md/);
+});
+
+test('提示词带上技能包文件清单、参考资料与脚本说明', async () => {
+  const pkg = await parseSkillPackage(skillZip(), 'panda-skill.zip');
+  const { prompt } = buildSkillPrompt({
+    skill: pkg,
+    oldName: 'old.xlsx',
+    newName: 'new.xlsx',
+    oldWorkbook: [{ name: '美西', header: ['船名'], rows: [['MSC ANA']] }],
+    newWorkbook: [{ name: '美西', header: ['船名'], rows: [['MSC BOB']] }],
+  });
+  assert.match(prompt, /技能包文件:SKILL\.md/);
+  assert.match(prompt, /本次不执行/);
+  assert.match(prompt, /参考资料 =====/);
+  assert.match(prompt, /周数滚动的旧周不标删除/);
+});
+
+test('服务层:zip 技能包会落盘留档', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-skill-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const llm = {
+    availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
+    complete: async () => JSON.stringify({ summary: '无变化。', stats: { added: 0, removed: 0, changed: 0 }, items: [] }),
+  };
+  const service = new ScheduleService(db, home, llm);
+  const pkg = await parseSkillPackage(skillZip(), 'panda-skill.zip');
+  const record = await service.compareWithSkill({
+    oldBuffer: xlsx(OLD_ROWS),
+    oldName: 'old.xlsx',
+    newBuffer: xlsx(NEW_ROWS),
+    newName: 'new.xlsx',
+    skill: pkg,
+  });
+  assert.equal(record.skill.kind, 'zip');
+  assert.equal(record.skill.scripts.length, 1);
+  assert.ok(record.skill.dir.includes('skills'));
+  assert.ok(fs.existsSync(path.join(record.skill.dir, 'SKILL.md')));
+  assert.ok(fs.existsSync(path.join(record.skill.dir, 'scripts/panda_compare.py')));
+  assert.ok(fs.existsSync(path.join(record.skill.dir, 'meta.json')));
 });

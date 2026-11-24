@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readWorkbook } from './workbook.js';
+import { readZip } from '../util/zip.js';
 
 /**
  * Skill 驱动的船期对比。
@@ -11,6 +12,17 @@ import { readWorkbook } from './workbook.js';
 
 /** 技能文件大小上限:再大就不是「技能」而是数据集了。 */
 export const MAX_SKILL_BYTES = 200_000;
+/** 技能包(zip)上限:含脚本和参考资料,给到 10MB。 */
+export const MAX_PACKAGE_BYTES = 10 * 1024 * 1024;
+/** 单份参考资料最多喂多少字符。 */
+const MAX_REFERENCE_CHARS = 8000;
+/** 参考资料合计上限。 */
+const MAX_REFERENCES_TOTAL = 30_000;
+
+/** 能作为「参考资料」读进提示词的文本类型。 */
+const TEXT_EXTENSIONS = new Set(['.md', '.markdown', '.txt', '.json', '.csv', '.tsv', '.yaml', '.yml']);
+/** 技能包里的脚本:只列清单,不执行(执行用户上传的脚本需要单独开关)。 */
+const SCRIPT_EXTENSIONS = new Set(['.py', '.js', '.mjs', '.cjs', '.sh', '.bash', '.ps1', '.bat', '.cmd']);
 /** 每次喂给模型的最大字符数(两份表 + 技能)。超出会截断并告知模型。 */
 export const DEFAULT_PROMPT_BUDGET = 60_000;
 
@@ -84,6 +96,94 @@ export function parseSkillFile(buffer, filename = 'skill.md') {
   };
 }
 
+function extensionOf(name) {
+  const match = /\.[^./]+$/.exec(String(name ?? '').toLowerCase());
+  return match ? match[0] : '';
+}
+
+/** 归一化包内路径;绝对路径与 `..` 一律丢弃(防目录穿越)。 */
+export function safeEntryPath(name) {
+  const normalized = String(name ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!normalized || normalized.includes('\0')) return '';
+  const parts = normalized.split('/').filter((part) => part && part !== '.');
+  if (parts.some((part) => part === '..')) return '';
+  return parts.join('/');
+}
+
+/**
+ * 解析技能包:支持 `.zip`(SKILL.md + 参考资料 + 脚本)与单个 `.md/.txt`。
+ *
+ * zip 会被安全解包:过滤绝对路径/`..`;找 `SKILL.md`(优先最浅的那份);
+ * 参考资料里的文本会随提示词一起给模型;脚本只列清单、不执行。
+ */
+export async function parseSkillPackage(buffer, filename = 'skill.zip') {
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? []);
+  if (bytes.length === 0) throw new Error('Skill 包是空的');
+  if (bytes.length > MAX_PACKAGE_BYTES) {
+    throw new Error(`Skill 包太大(${(bytes.length / 1024 / 1024).toFixed(1)}MB),上限 ${MAX_PACKAGE_BYTES / 1024 / 1024}MB`);
+  }
+  const looksZip = /\.zip$/i.test(filename) || (bytes[0] === 0x50 && bytes[1] === 0x4b);
+  if (!looksZip) {
+    const skill = parseSkillFile(bytes, filename);
+    return { ...skill, kind: 'text', entries: [], references: [], files: [], scripts: [] };
+  }
+
+  const zip = await readZip(bytes);
+  const entries = [];
+  for (const [rawName, data] of zip) {
+    const entryPath = safeEntryPath(rawName);
+    if (!entryPath || entryPath.endsWith('/')) continue;
+    entries.push({ path: entryPath, data, size: data.length });
+  }
+  if (entries.length === 0) throw new Error('Skill 包里没有可用文件');
+
+  const documents = entries
+    .filter((entry) => /(^|\/)skill\.md$/i.test(entry.path))
+    .sort((left, right) => left.path.split('/').length - right.path.split('/').length);
+  if (documents.length === 0) throw new Error('Skill 包里缺少 SKILL.md');
+  const skillDocument = documents[0];
+  const skill = parseSkillFile(skillDocument.data, skillDocument.path);
+
+  // 参考资料:除 SKILL.md 外的文本文件,按路径排序,单份与总量都设上限。
+  let budget = MAX_REFERENCES_TOTAL;
+  const references = [];
+  for (const entry of entries) {
+    if (entry === skillDocument) continue;
+    if (!TEXT_EXTENSIONS.has(extensionOf(entry.path))) continue;
+    if (budget <= 0) break;
+    const text = normalizeText(entry.data.toString('utf8')).slice(0, Math.min(MAX_REFERENCE_CHARS, budget));
+    if (!text) continue;
+    references.push({ path: entry.path, text });
+    budget -= text.length;
+  }
+  const scripts = entries
+    .filter((entry) => SCRIPT_EXTENSIONS.has(extensionOf(entry.path)))
+    .map((entry) => entry.path);
+  return {
+    ...skill,
+    kind: 'zip',
+    entries,
+    references,
+    scripts,
+    files: entries.map((entry) => ({ path: entry.path, size: entry.size })),
+  };
+}
+
+/** 去掉 Buffer/长文本,只留能进接口与记录的元信息。 */
+export function skillMeta(skill) {
+  if (!skill) return null;
+  return {
+    name: skill.name,
+    description: skill.description,
+    filename: skill.filename,
+    hash: skill.hash,
+    kind: skill.kind ?? 'text',
+    files: (skill.files ?? []).map((file) => ({ path: file.path, size: file.size })),
+    scripts: skill.scripts ?? [],
+    referenceCount: (skill.references ?? []).length,
+  };
+}
+
 /** 单元格 → 便于模型读的文本。 */
 function cellToText(value) {
   if (value === null || value === undefined) return '';
@@ -135,6 +235,20 @@ export function buildSkillPrompt({ skill, oldName, newName, oldWorkbook, newWork
     '',
     `===== 对比技能(Skill:${skill.name}) =====`,
     skill.body,
+  ];
+  if (skill.files?.length) {
+    lines.push('', `技能包文件:${skill.files.map((file) => file.path).join('、')}`);
+  }
+  if (skill.scripts?.length) {
+    lines.push(`技能包内脚本(本次不执行,只按文档与参考资料判断):${skill.scripts.join('、')}`);
+  }
+  if (skill.references?.length) {
+    lines.push('', '===== 技能包参考资料 =====');
+    for (const reference of skill.references) {
+      lines.push(`--- ${reference.path} ---`, reference.text);
+    }
+  }
+  lines.push(
     '',
     `===== 旧版文件:${oldName} =====`,
     oldText.text,
@@ -142,7 +256,7 @@ export function buildSkillPrompt({ skill, oldName, newName, oldWorkbook, newWork
     `===== 新版文件:${newName} =====`,
     newText.text,
     '',
-  ];
+  );
   const truncated = oldText.truncated || newText.truncated;
   if (truncated) lines.push('注意:表格内容有截断,summary 里必须说明「仅比较了部分行」。');
   lines.push('按 Skill 的规则逐行对比,只输出约定的 JSON。');

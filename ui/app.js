@@ -1362,9 +1362,9 @@ function renderSchedule(view) {
       </div>
       <div class="row" style="margin-top:12px">
         <label class="file-drop" id="schedule-skill-drop" style="flex:1">
-          <input type="file" id="schedule-skill" accept=".md,.markdown,.txt" hidden />
+          <input type="file" id="schedule-skill" accept=".zip,.md,.markdown,.txt" hidden />
           <div><strong>对比 Skill</strong>${cursor.skillFile ? ' · 已导入' : ''}</div>
-          <div class="field-note">${esc(cursor.skillFile?.name ?? '导入 .md / .txt(可选)')}</div>
+          <div class="field-note">${esc(cursor.skillFile?.name ?? '导入 Skill 包 .zip 或 .md(可选)')}</div>
         </label>
         <button class="btn btn-primary" id="schedule-upload" ${
           !cursor.oldFile || !cursor.newFile || cursor.busy ? 'disabled' : ''
@@ -1710,6 +1710,13 @@ function skillResultHtml(result) {
     <div class="card">
       <div class="row">
         <span class="chip chip-new">Skill · ${esc(skill.name ?? '')}</span>
+        ${
+          (skill.files ?? []).length
+            ? `<span class="chip">${skill.files.length} 个文件${
+                (skill.scripts ?? []).length ? ` · ${skill.scripts.length} 个脚本(未执行)` : ''
+              }</span>`
+            : ''
+        }
         <span class="chip">${result.stats.added} 新增</span>
         <span class="chip">${result.stats.removed} 删除</span>
         <span class="chip ${result.stats.changed ? 'chip-warn' : ''}">${result.stats.changed} 变更</span>

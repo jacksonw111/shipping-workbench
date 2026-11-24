@@ -28,6 +28,7 @@ import {
   exportSkillResult,
   parseSkillResult,
   readSheets,
+  skillMeta,
 } from './skill-compare.js';
 
 /** 船期表新旧对比:有船东配置走配置引擎,没有就走通用对比。 */
@@ -241,6 +242,8 @@ export class ScheduleService {
     if (!skill?.body) throw new HttpError(400, '请先导入 Skill 文件');
     const startedAt = Date.now();
     const carrier = carrierId ? this.db.getCarrier(carrierId) : null;
+    // 技能包落盘留档:以后能回看这次到底用了哪份 Skill。
+    const skillDir = this.saveSkillPackage(skill);
     const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
     const newSheets = readSheets(await workbookOf(newBuffer, newName));
     if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
@@ -271,7 +274,7 @@ export class ScheduleService {
       carrierId: carrier?.id ?? '',
       carrierName: carrier?.name ?? carrierName,
       today: todayIso(),
-      skill: { name: skill.name, description: skill.description, filename: skill.filename, hash: skill.hash },
+      skill: { ...skillMeta(skill), dir: skillDir },
       summary: parsed.summary,
       digest: parsed.summary,
       stats: { ...parsed.stats, skipped: 0 },
@@ -298,6 +301,21 @@ export class ScheduleService {
       durationMs: record.durationMs,
     });
     return record;
+  }
+
+  /** 把技能包解出来的文件存到 `schedule/skills/<hash>/`,便于复用与审计。 */
+  saveSkillPackage(skill) {
+    if (!skill?.hash || !(skill.entries ?? []).length) return '';
+    const dir = ensureDir(path.join(this.home, 'schedule', 'skills', skill.hash));
+    for (const entry of skill.entries) {
+      const target = path.join(dir, entry.path);
+      const relative = path.relative(dir, target);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, entry.data);
+    }
+    writeJson(path.join(dir, 'meta.json'), skillMeta(skill));
+    return dir;
   }
 
   /**

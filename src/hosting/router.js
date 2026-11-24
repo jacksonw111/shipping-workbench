@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { HttpError, readBody, sendError, sendJson, parseMultipart } from '../util/http-util.js';
 import { ingestMailAttachments } from '../domain/mail-ingest.js';
 import { buildSchedulePairs, matchRunForPair } from '../domain/schedule-pairs.js';
-import { parseSkillFile } from '../domain/skill-compare.js';
+import { parseSkillPackage } from '../domain/skill-compare.js';
 import { createHash } from 'node:crypto';
 import { BATCH_SYSTEM_PROMPT, trackSystemPrompt } from '../domain/llm.js';
 
@@ -284,10 +284,10 @@ async function handleApi(req, res, url, route, services) {
       const newFile = files.find((item) => item.name === 'newFile');
       const skillFile = files.find((item) => item.name === 'skillFile');
       if (!oldFile || !newFile) throw new HttpError(400, '请同时上传旧版与新版文件');
-      if (!skillFile) throw new HttpError(400, '请导入 Skill 文件(.md / .txt)');
+      if (!skillFile) throw new HttpError(400, '请导入 Skill 包(.zip)或 .md / .txt');
       let skill;
       try {
-        skill = parseSkillFile(skillFile.data, skillFile.filename ?? 'skill.md');
+        skill = await parseSkillPackage(skillFile.data, skillFile.filename ?? 'skill.zip');
       } catch (error) {
         throw new HttpError(400, error.message);
       }
