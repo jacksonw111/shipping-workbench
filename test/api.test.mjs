@@ -472,3 +472,46 @@ test('判定提示词接口:返回默认与自定义', async () => {
     server.close();
   }
 });
+
+test('Skill 对比接口:缺文件 400,带 Skill 时按模型结果返回', async () => {
+  const home = tempHome();
+  const seen = [];
+  const llm = {
+    availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
+    check: async () => ({ skipped: true }),
+    apply: () => {},
+    complete: async ({ system, prompt }) => {
+      seen.push({ system, prompt });
+      return JSON.stringify({
+        summary: '开航推迟一天。',
+        stats: { added: 0, removed: 0, changed: 1 },
+        items: [{ sheet: '美西', key: 'MSC ANA/001E', status: '变更', changes: [{ field: '开航日期', from: '12-01', to: '12-02' }] }],
+        rules: ['按船名+航次配对'],
+      });
+    },
+  };
+  const server = await startServer(home, { llm });
+  const base = `http://127.0.0.1:${server.address().port}/shipping-workbench/api`;
+  const sheet = (date) => workbookBuffer([['船名', '航次', '开航日期'], ['MSC ANA', '001E', date]], '美西');
+  try {
+    let response = await fetch(`${base}/schedule/skill`, { method: 'POST', body: form({}, {}) });
+    assert.equal(response.status, 400);
+
+    response = await fetch(`${base}/schedule/skill`, {
+      method: 'POST',
+      body: form({}, {
+        oldFile: new File([sheet('2026-12-01')], 'old.xlsx'),
+        newFile: new File([sheet('2026-12-02')], 'new.xlsx'),
+        skillFile: new File(['# 技能\n\n按船名+航次配对'], 'demo.md', { type: 'text/markdown' }),
+      }),
+    });
+    const data = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(data));
+    assert.equal(data.result.mode, 'skill');
+    assert.equal(data.result.stats.changed, 1);
+    assert.equal(data.result.skill.name, '技能');
+    assert.match(seen[0].prompt, /按船名\+航次配对/);
+  } finally {
+    server.close();
+  }
+});

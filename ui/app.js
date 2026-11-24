@@ -51,6 +51,7 @@ const state = {
   schedule: {
     oldFile: null,
     newFile: null,
+    skillFile: null,
     busy: false,
     fetchingMail: false,
     fetchProgress: null,
@@ -1360,9 +1361,21 @@ function renderSchedule(view) {
         </label>
       </div>
       <div class="row" style="margin-top:12px">
+        <label class="file-drop" id="schedule-skill-drop" style="flex:1">
+          <input type="file" id="schedule-skill" accept=".md,.markdown,.txt" hidden />
+          <div><strong>对比 Skill</strong>${cursor.skillFile ? ' · 已导入' : ''}</div>
+          <div class="field-note">${esc(cursor.skillFile?.name ?? '导入 .md / .txt(可选)')}</div>
+        </label>
         <button class="btn btn-primary" id="schedule-upload" ${
           !cursor.oldFile || !cursor.newFile || cursor.busy ? 'disabled' : ''
-        }>${cursor.busy ? '<span class="spinner"></span> 对比中' : '对比这两份'}</button>
+        }>${
+          cursor.busy
+            ? '<span class="spinner"></span> 对比中'
+            : cursor.skillFile
+              ? '用 Agent 按 Skill 对比'
+              : '对比这两份'
+        }</button>
+        ${cursor.skillFile ? '<button class="btn btn-ghost" id="schedule-skill-clear">移除 Skill</button>' : ''}
       </div>
     </div>
     <div class="card" style="padding:0">
@@ -1404,7 +1417,17 @@ function renderSchedule(view) {
     state.schedule.newFile = event.target.files[0] ?? null;
     render();
   });
-  view.querySelector('#schedule-upload').addEventListener('click', runUploadCompare);
+  view.querySelector('#schedule-skill').addEventListener('change', (event) => {
+    state.schedule.skillFile = event.target.files[0] ?? null;
+    render();
+  });
+  view.querySelector('#schedule-skill-clear')?.addEventListener('click', () => {
+    state.schedule.skillFile = null;
+    render();
+  });
+  view.querySelector('#schedule-upload').addEventListener('click', () =>
+    state.schedule.skillFile ? runSkillCompare() : runUploadCompare(),
+  );
   view.querySelector('#pairs-refresh').addEventListener('click', () => loadPairs());
   view.querySelector('#mail-fetch').addEventListener('click', fetchMailForPairs);
   view.querySelectorAll('[data-compare-pair]').forEach((button) => {
@@ -1513,6 +1536,35 @@ async function fetchMailForPairs() {
   else toast(`新增 ${progress?.fetched ?? 0} 封 · 识别 ${progress?.ingested ?? 0} 个附件`, 'ok');
   await refreshBoot();
   render();
+}
+
+/** 带 Skill 的对比:交给模型按 Skill 规则比,结果是一份结构化差异清单。 */
+async function runSkillCompare() {
+  const cursor = state.schedule;
+  if (!cursor.oldFile || !cursor.newFile) return toast('旧版与新版都要有', 'error');
+  if (!cursor.skillFile) return toast('先导入 Skill 文件', 'error');
+  cursor.busy = true;
+  render();
+  try {
+    const form = new FormData();
+    form.append('oldFile', cursor.oldFile);
+    form.append('newFile', cursor.newFile);
+    form.append('skillFile', cursor.skillFile);
+    if (cursor.carrierId) form.append('carrierId', cursor.carrierId);
+    const data = await api('/schedule/skill', { method: 'POST', body: form });
+    cursor.result = data.result;
+    cursor.sheet = '';
+    cursor.side = 'old';
+    cursor.summaryView = false;
+    cursor.runs.loaded = false;
+    cursor.pairs.loaded = false;
+    toast(`Skill 对比完成:${data.result.stats.added} 新增 / ${data.result.stats.removed} 删除 / ${data.result.stats.changed} 变更`, 'ok');
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    cursor.busy = false;
+    render();
+  }
 }
 
 async function runUploadCompare() {
@@ -1646,7 +1698,64 @@ function agentReviewHtml(result) {
 }
 
 function scheduleResultHtml(result) {
+  if (result.mode === 'skill') return skillResultHtml(result);
   return result.mode === 'profile' ? profileResultHtml(result) : genericResultHtml(result);
+}
+
+/** Skill 对比结果:摘要 + 统计 + 用到的规则 + 逐条差异。 */
+function skillResultHtml(result) {
+  const items = result.items ?? [];
+  const skill = result.skill ?? {};
+  return `
+    <div class="card">
+      <div class="row">
+        <span class="chip chip-new">Skill · ${esc(skill.name ?? '')}</span>
+        <span class="chip">${result.stats.added} 新增</span>
+        <span class="chip">${result.stats.removed} 删除</span>
+        <span class="chip ${result.stats.changed ? 'chip-warn' : ''}">${result.stats.changed} 变更</span>
+        ${result.truncated ? '<span class="chip chip-warn">表格有截断</span>' : ''}
+        <span class="spacer"></span>
+        <button class="btn" data-export-schedule>导出 xlsx</button>
+      </div>
+      ${
+        (result.rules ?? []).length
+          ? `<div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">
+              ${result.rules.map((rule) => `<span class="chip">${esc(rule)}</span>`).join('')}
+            </div>`
+          : ''
+      }
+    </div>
+    <div class="card" style="padding:0">
+      <div class="table-scroll" style="max-height:620px">
+        <table class="table">
+          <thead><tr><th>工作表</th><th>对比键</th><th>结果</th><th>字段</th><th>旧 → 新</th><th>说明</th></tr></thead>
+          <tbody>
+            ${
+              items.length === 0
+                ? `<tr><td colspan="6"><div class="empty">Skill 判定没有差异</div></td></tr>`
+                : items
+                    .map(
+                      (item) => `<tr>
+                        <td>${esc(item.sheet ?? '')}</td>
+                        <td class="mono">${esc(item.key ?? '')}</td>
+                        <td>${statusChip(item.status)}</td>
+                        <td>${esc((item.changes ?? []).map((change) => change.field).filter(Boolean).join('、'))}</td>
+                        <td>${(item.changes ?? [])
+                          .map(
+                            (change) =>
+                              `<div>${esc(change.from ?? '')} → <span class="strong">${esc(change.to ?? '')}</span></div>`,
+                          )
+                          .join('')}</td>
+                        <td>${esc(item.note ?? '')}</td>
+                      </tr>`,
+                    )
+                    .join('')
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function profileResultHtml(result) {

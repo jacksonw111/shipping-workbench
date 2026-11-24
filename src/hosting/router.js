@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { HttpError, readBody, sendError, sendJson, parseMultipart } from '../util/http-util.js';
 import { ingestMailAttachments } from '../domain/mail-ingest.js';
 import { buildSchedulePairs, matchRunForPair } from '../domain/schedule-pairs.js';
+import { parseSkillFile } from '../domain/skill-compare.js';
 import { createHash } from 'node:crypto';
 import { BATCH_SYSTEM_PROMPT, trackSystemPrompt } from '../domain/llm.js';
 
@@ -276,6 +277,31 @@ async function handleApi(req, res, url, route, services) {
         versions: schedule.versions(carrierId),
       });
     }
+    // Skill 驱动的对比:导入技能文件,让模型按里面的规则比两份表。
+    if (rest[0] === 'skill' && method === 'POST') {
+      const { files, fields } = await readMultipart(req);
+      const oldFile = files.find((item) => item.name === 'oldFile');
+      const newFile = files.find((item) => item.name === 'newFile');
+      const skillFile = files.find((item) => item.name === 'skillFile');
+      if (!oldFile || !newFile) throw new HttpError(400, '请同时上传旧版与新版文件');
+      if (!skillFile) throw new HttpError(400, '请导入 Skill 文件(.md / .txt)');
+      let skill;
+      try {
+        skill = parseSkillFile(skillFile.data, skillFile.filename ?? 'skill.md');
+      } catch (error) {
+        throw new HttpError(400, error.message);
+      }
+      const result = await schedule.compareWithSkill({
+        oldBuffer: oldFile.data,
+        oldName: oldFile.filename ?? 'old.xlsx',
+        newBuffer: newFile.data,
+        newName: newFile.filename ?? 'new.xlsx',
+        skill,
+        carrierId: String(fields.carrierId ?? '').trim(),
+      });
+      return sendJson(res, 200, { result, runs: schedule.listRuns({ limit: 20 }).items });
+    }
+
     // 结构体检:能不能按现有配置认出来;认不出来就请模型给列映射。
     if (rest[0] === 'analyze' && method === 'POST') {
       const { files, fields } = await readMultipart(req);

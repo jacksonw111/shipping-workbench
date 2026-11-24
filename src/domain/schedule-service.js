@@ -20,7 +20,15 @@ import {
   writeDigest,
 } from './schedule-agent.js';
 import { writeXlsx } from './xlsx-writer.js';
+import { todayIso } from '../util/dates.js';
 import { isPdfFile, pdfToWorkbookBuffer } from './pdf.js';
+import {
+  SKILL_SYSTEM_PROMPT,
+  buildSkillPrompt,
+  exportSkillResult,
+  parseSkillResult,
+  readSheets,
+} from './skill-compare.js';
 
 /** 船期表新旧对比:有船东配置走配置引擎,没有就走通用对比。 */
 export class ScheduleService {
@@ -222,6 +230,77 @@ export class ScheduleService {
   }
 
   /**
+   * Skill 驱动的对比:按用户导入的技能文件,让模型自己看两份表做对比。
+   *
+   * 和 run() 的区别:不走固定键/固定列,规则完全来自 Skill 文本;
+   * 结果是一份结构化差异清单(mode: 'skill'),同样能导出 xlsx。
+   */
+  async compareWithSkill({ oldBuffer, oldName, newBuffer, newName, skill, carrierId = '', carrierName = '' }) {
+    const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
+    if (!availability.available) throw new HttpError(400, availability.reason);
+    if (!skill?.body) throw new HttpError(400, '请先导入 Skill 文件');
+    const startedAt = Date.now();
+    const carrier = carrierId ? this.db.getCarrier(carrierId) : null;
+    const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
+    const newSheets = readSheets(await workbookOf(newBuffer, newName));
+    if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
+
+    const { prompt, truncated, rows } = buildSkillPrompt({
+      skill,
+      oldName,
+      newName,
+      oldWorkbook: oldSheets,
+      newWorkbook: newSheets,
+      carrierName: carrier?.name ?? carrierName,
+    });
+    const text = await this.llm.complete({ system: SKILL_SYSTEM_PROMPT, prompt, temperature: 0.2 });
+    const parsed = parseSkillResult(text);
+    if (!parsed) throw new HttpError(502, '模型没有返回可用的对比结果,换个 Skill 或再试一次');
+
+    const id = randomUUID();
+    const dir = ensureDir(this.runDir(id));
+    fs.writeFileSync(path.join(dir, `old-${slugify(path.basename(oldName || 'old.xlsx'))}`), oldBuffer);
+    fs.writeFileSync(path.join(dir, `new-${slugify(path.basename(newName || 'new.xlsx'))}`), newBuffer);
+    fs.writeFileSync(path.join(dir, `skill-${slugify(path.basename(skill.filename || 'skill.md'))}`), skill.body);
+    const record = {
+      id,
+      mode: 'skill',
+      generatedAt: new Date().toISOString(),
+      oldName: oldName || '旧版',
+      newName: newName || '新版',
+      carrierId: carrier?.id ?? '',
+      carrierName: carrier?.name ?? carrierName,
+      today: todayIso(),
+      skill: { name: skill.name, description: skill.description, filename: skill.filename, hash: skill.hash },
+      summary: parsed.summary,
+      digest: parsed.summary,
+      stats: { ...parsed.stats, skipped: 0 },
+      items: parsed.items,
+      rules: parsed.rules,
+      truncated,
+      promptChars: prompt.length,
+      tableRows: rows,
+      model: { provider: availability.provider ?? '', model: availability.model ?? '' },
+      sheets: [],
+      durationMs: Date.now() - startedAt,
+    };
+    writeJson(path.join(dir, 'result.json'), record);
+    writeJson(path.join(dir, 'result-full.json'), record);
+    this.db.insertRun({
+      id,
+      kind: 'schedule',
+      title: `${carrier ? `${carrier.name} · ` : ''}${record.oldName} → ${record.newName} · Skill:${skill.name}`,
+      source: 'skill',
+      inputs: { oldName, newName, carrierId: carrier?.id ?? '', skill: { name: skill.name, hash: skill.hash } },
+      stats: record.stats,
+      detail: { mode: 'skill', skill: skill.name, truncated, items: record.items.length },
+      createdAt: record.generatedAt,
+      durationMs: record.durationMs,
+    });
+    return record;
+  }
+
+  /**
    * 结构体检:这版文件的表头能不能被现有配置认出来。
    *
    * 认不出来(或键列/开航日期列对不上)时,让模型给一份「字段 → 表头列」的映射,
@@ -415,6 +494,9 @@ export class ScheduleService {
   exportBuffer(id) {
     const result = readJson(path.join(this.runDir(id), 'result-full.json'), null);
     if (!result) throw new HttpError(404, '对比结果不存在');
+    if (result.mode === 'skill') {
+      return { buffer: writeXlsx(exportSkillResult(result)), filename: `船期对比-Skill-${id.slice(0, 8)}.xlsx` };
+    }
     const sheets =
       result.mode === 'profile' ? exportProfileResult(result).sheets : scheduleExportSheets(result);
     return { buffer: writeXlsx(sheets), filename: `船期对比-${id.slice(0, 8)}.xlsx` };
