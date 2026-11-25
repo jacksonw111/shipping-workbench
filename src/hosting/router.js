@@ -298,7 +298,11 @@ async function handleApi(req, res, url, route, services) {
         newName: newFile.filename ?? 'new.xlsx',
         skill,
         carrierId: String(fields.carrierId ?? '').trim(),
-        executeScripts: fields.executeScripts === '1' || fields.executeScripts === 'true',
+        // 不传 = 自动(技能包有脚本就执行);显式传 0 才关闭。
+        executeScripts:
+          fields.executeScripts === undefined || fields.executeScripts === ''
+            ? undefined
+            : fields.executeScripts === '1' || fields.executeScripts === 'true',
       });
       return sendJson(res, 200, { result, runs: schedule.listRuns({ limit: 20 }).items });
     }

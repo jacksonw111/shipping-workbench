@@ -1382,7 +1382,7 @@ function renderSchedule(view) {
         cursor.skillFile
           ? `<label class="switch" style="margin-top:10px">
               <input type="checkbox" id="schedule-exec" ${cursor.executeScripts ? 'checked' : ''} />
-              执行技能包脚本(按 Skill 原生产物,需要包内有 scripts/)
+              执行技能包脚本(有 scripts/ 时强烈建议开启,产物格式由脚本决定)
             </label>`
           : ''
       }
@@ -1427,7 +1427,10 @@ function renderSchedule(view) {
     render();
   });
   view.querySelector('#schedule-skill').addEventListener('change', (event) => {
-    state.schedule.skillFile = event.target.files[0] ?? null;
+    const file = event.target.files[0] ?? null;
+    state.schedule.skillFile = file;
+    // 技能包(zip)通常自带脚本,默认执行;单个 .md 没有脚本可执行。
+    state.schedule.executeScripts = Boolean(file && /\.zip$/i.test(file.name));
     render();
   });
   view.querySelector('#schedule-skill-clear')?.addEventListener('click', () => {
@@ -1739,7 +1742,15 @@ function skillResultHtml(result) {
         <button class="btn" data-export-schedule>导出 xlsx</button>
       </div>
       ${
-        result.execution
+        result.execution?.skipped
+          ? `<div class="banner banner-warn" style="margin-top:12px">
+              技能包里检测到脚本 <span class="mono">${esc(result.execution.script ?? '')}</span>,但本次没有执行——
+              结果是模型按文档推断的,可能和 Skill 要求的产物不一致。重新对比时勾选「执行技能包脚本」。
+            </div>`
+          : ''
+      }
+      ${
+        result.execution && !result.execution.skipped
           ? `<div class="banner ${result.execution.code === 0 ? 'banner-ok' : 'banner-warn'}" style="margin-top:12px">
               <div class="row">
                 <span class="chip ${result.execution.code === 0 ? 'chip-ok' : 'chip-danger'}">脚本退出码 ${result.execution.code}</span>

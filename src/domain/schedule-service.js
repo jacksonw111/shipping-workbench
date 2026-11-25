@@ -245,7 +245,7 @@ export class ScheduleService {
     skill,
     carrierId = '',
     carrierName = '',
-    executeScripts = false,
+    executeScripts,
   }) {
     if (!skill?.body) throw new HttpError(400, '请先导入 Skill 文件');
     const startedAt = Date.now();
@@ -264,8 +264,13 @@ export class ScheduleService {
     let execution = null;
     let parsed = null;
     let modelUsed = null;
-    const entryScript = executeScripts ? detectEntryScript(skill) : null;
-    if (entryScript && skillDir) {
+    // 默认「有脚本就执行」:之前的默认关闭导致用户导入带脚本的技能包却走了模型,结果对不上。
+    const entryScript = detectEntryScript(skill);
+    const shouldRun = executeScripts === undefined ? Boolean(entryScript) : Boolean(executeScripts);
+    if (entryScript && !shouldRun) {
+      execution = { skipped: true, script: entryScript, reason: '技能包内有脚本,但本次未启用执行' };
+    }
+    if (entryScript && shouldRun && skillDir) {
       try {
         execution = await runSkillScript({
           skillDir,

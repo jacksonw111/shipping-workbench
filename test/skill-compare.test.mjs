@@ -304,7 +304,46 @@ test('不执行脚本且没有模型时,给可读的 400', async () => {
         newBuffer: xlsx(NEW_ROWS),
         newName: 'new.xlsx',
         skill: pkg,
+        executeScripts: false,
       }),
     (error) => error.status === 400 && /没有模型/.test(error.message),
   );
+});
+
+
+test('默认行为:技能包有脚本就直接执行,不需要前端传开关', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const service = new ScheduleService(db, home, null); // 没有模型也能跑
+  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
+  const record = await service.compareWithSkill({
+    oldBuffer: xlsx(OLD_ROWS),
+    oldName: 'old.xlsx',
+    newBuffer: xlsx(NEW_ROWS),
+    newName: 'new.xlsx',
+    skill: pkg,
+  });
+  assert.equal(record.execution.code, 0, JSON.stringify(record.execution));
+  assert.equal(record.outputFiles.length, 1);
+});
+
+test('显式关闭执行时,记录里标明跳过原因', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const service = new ScheduleService(db, home, {
+    availability: () => ({ available: true, provider: 'p', model: 'm' }),
+    complete: async () => JSON.stringify({ summary: '模型结果', report: '# 报告', items: [] }),
+  });
+  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
+  const record = await service.compareWithSkill({
+    oldBuffer: xlsx(OLD_ROWS),
+    oldName: 'old.xlsx',
+    newBuffer: xlsx(NEW_ROWS),
+    newName: 'new.xlsx',
+    skill: pkg,
+    executeScripts: false,
+  });
+  assert.equal(record.execution.skipped, true);
+  assert.match(record.execution.reason, /未启用/);
+  assert.equal(record.markdown, '# 报告');
 });
