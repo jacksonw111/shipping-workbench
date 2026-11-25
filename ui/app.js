@@ -52,6 +52,7 @@ const state = {
     oldFile: null,
     newFile: null,
     skillFile: null,
+    executeScripts: false,
     busy: false,
     fetchingMail: false,
     fetchProgress: null,
@@ -1377,6 +1378,14 @@ function renderSchedule(view) {
         }</button>
         ${cursor.skillFile ? '<button class="btn btn-ghost" id="schedule-skill-clear">移除 Skill</button>' : ''}
       </div>
+      ${
+        cursor.skillFile
+          ? `<label class="switch" style="margin-top:10px">
+              <input type="checkbox" id="schedule-exec" ${cursor.executeScripts ? 'checked' : ''} />
+              执行技能包脚本(按 Skill 原生产物,需要包内有 scripts/)
+            </label>`
+          : ''
+      }
     </div>
     <div class="card" style="padding:0">
       <div class="list-controls" style="padding:12px 12px 4px"><strong>最近对比</strong></div>
@@ -1423,7 +1432,11 @@ function renderSchedule(view) {
   });
   view.querySelector('#schedule-skill-clear')?.addEventListener('click', () => {
     state.schedule.skillFile = null;
+    state.schedule.executeScripts = false;
     render();
+  });
+  view.querySelector('#schedule-exec')?.addEventListener('change', (event) => {
+    state.schedule.executeScripts = event.target.checked;
   });
   view.querySelector('#schedule-upload').addEventListener('click', () =>
     state.schedule.skillFile ? runSkillCompare() : runUploadCompare(),
@@ -1551,6 +1564,7 @@ async function runSkillCompare() {
     form.append('newFile', cursor.newFile);
     form.append('skillFile', cursor.skillFile);
     if (cursor.carrierId) form.append('carrierId', cursor.carrierId);
+    form.append('executeScripts', cursor.executeScripts ? '1' : '0');
     const data = await api('/schedule/skill', { method: 'POST', body: form });
     cursor.result = data.result;
     cursor.sheet = '';
@@ -1724,6 +1738,38 @@ function skillResultHtml(result) {
         <span class="spacer"></span>
         <button class="btn" data-export-schedule>导出 xlsx</button>
       </div>
+      ${
+        result.execution
+          ? `<div class="banner ${result.execution.code === 0 ? 'banner-ok' : 'banner-warn'}" style="margin-top:12px">
+              <div class="row">
+                <span class="chip ${result.execution.code === 0 ? 'chip-ok' : 'chip-danger'}">脚本退出码 ${result.execution.code}</span>
+                <span class="mono">${esc(result.execution.script ?? '')}</span>
+                <span class="field-note">${(result.execution.durationMs ?? 0) / 1000}s</span>
+                <span class="spacer"></span>
+                ${(result.outputFiles ?? [])
+                  .map(
+                    (file) =>
+                      `<a class="btn" href="${API}/schedule/runs/${encodeURIComponent(result.id)}/outputs/${encodeURIComponent(
+                        file.name,
+                      )}" download="${esc(file.name)}">下载 ${esc(file.name)}</a>`,
+                  )
+                  .join(' ')}
+              </div>
+              ${
+                result.execution.stdout || result.execution.stderr || result.execution.error
+                  ? `<pre class="field-note" style="white-space:pre-wrap;margin:8px 0 0;max-height:180px;overflow:auto">${esc(
+                      result.execution.error || result.execution.stdout || result.execution.stderr,
+                    )}</pre>`
+                  : ''
+              }
+            </div>`
+          : ''
+      }
+      ${
+        result.markdown
+          ? `<div class="reader-body hot-body" style="margin-top:12px">${renderHotspotBody(result.markdown, [])}</div>`
+          : ''
+      }
       ${
         (result.rules ?? []).length
           ? `<div class="row" style="margin-top:10px;flex-wrap:wrap;gap:6px">

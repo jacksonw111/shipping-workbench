@@ -62,6 +62,19 @@ panda-skill.zip
 流程:选旧版/新版 → 「对比 Skill」导入 zip(也兼容单个 `.md`) → 按钮变成
 「用 Agent 按 Skill 对比」。
 
+两种执行方式(取其一):
+
+1. **跑技能脚本(推荐,包内有 scripts/)**:勾选「执行技能包脚本」,用
+   `<解释器> scripts/xxx.py|mjs <旧版> <新版> --out <run>/out/result.xlsx` 直接跑,
+   产物文件出现在结果页并可下载——**输出格式完全由 Skill 的脚本决定**。
+   环境变量 `SKILL_OLD_FILE` / `SKILL_NEW_FILE` / `SKILL_OUT_DIR` 也会给到脚本。
+2. **模型按 Skill 对比(没有脚本时)**:把 SKILL.md + 参考资料 + 两份表交给模型,
+   要求它按 Skill 规定的格式写 `report`(Markdown),结果页直接渲染;
+   同时仍可给出结构化的增删改条目。
+
+数据保真:表格行**带 `(隐藏)` 标记**(Skill 常按 Excel 隐藏行剔除航线),
+默认每表 600 行 / 6 个 sheet / 12 万字符;超出会截断并在结果里标注。
+
 加载时做这些事:
 
 - 安全解包:过滤绝对路径与 `..`,单包上限 10MB;

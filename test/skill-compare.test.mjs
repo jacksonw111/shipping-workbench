@@ -16,6 +16,7 @@ import {
   workbookToText,
 } from '../src/domain/skill-compare.js';
 import { buildZip } from '../src/util/zip.js';
+import { detectEntryScript } from '../src/domain/skill-runner.js';
 
 function xlsx(rows) {
   const book = XLSX.utils.book_new();
@@ -249,4 +250,61 @@ test('服务层:zip 技能包会落盘留档', async () => {
   assert.ok(fs.existsSync(path.join(record.skill.dir, 'SKILL.md')));
   assert.ok(fs.existsSync(path.join(record.skill.dir, 'scripts/panda_compare.py')));
   assert.ok(fs.existsSync(path.join(record.skill.dir, 'meta.json')));
+});
+
+
+function scriptZip() {
+  return buildZip([
+    { name: 'SKILL.md', data: SKILL },
+    { name: 'scripts/compare.mjs', data: [
+      "import fs from 'node:fs';",
+      "fs.writeFileSync(process.env.SKILL_OUT_DIR + '/result.txt', '对比完成');",
+      "console.log('script done');",
+    ].join('\n') },
+  ]);
+}
+
+test('入口脚本选择:优先 compare/cmp,跳过 setup 类', () => {
+  assert.equal(detectEntryScript({ scripts: ['scripts/setup.py', 'scripts/compare.mjs'] }), 'scripts/compare.mjs');
+  assert.equal(detectEntryScript({ scripts: ['scripts/a.sh'] }), null);
+});
+
+test('执行技能脚本:产出文件落 out/,可下载', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const service = new ScheduleService(db, home, null);
+  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
+  const record = await service.compareWithSkill({
+    oldBuffer: xlsx(OLD_ROWS),
+    oldName: 'old.xlsx',
+    newBuffer: xlsx(NEW_ROWS),
+    newName: 'new.xlsx',
+    skill: pkg,
+    executeScripts: true,
+  });
+  assert.equal(record.execution.code, 0, JSON.stringify(record.execution));
+  assert.equal(record.outputFiles.length, 1);
+  assert.equal(record.outputFiles[0].name, 'result.txt');
+  assert.match(record.summary, /已执行技能脚本/);
+  const file = service.outputFile(record.id, 'result.txt');
+  assert.equal(file.buffer.toString('utf8'), '对比完成');
+  assert.throws(() => service.outputFile(record.id, '../result.json'), /不存在/);
+});
+
+test('不执行脚本且没有模型时,给可读的 400', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const service = new ScheduleService(db, home, { availability: () => ({ available: false, reason: '没有模型' }) });
+  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
+  await assert.rejects(
+    () =>
+      service.compareWithSkill({
+        oldBuffer: xlsx(OLD_ROWS),
+        oldName: 'old.xlsx',
+        newBuffer: xlsx(NEW_ROWS),
+        newName: 'new.xlsx',
+        skill: pkg,
+      }),
+    (error) => error.status === 400 && /没有模型/.test(error.message),
+  );
 });

@@ -30,6 +30,7 @@ import {
   readSheets,
   skillMeta,
 } from './skill-compare.js';
+import { detectEntryScript, runSkillScript } from './skill-runner.js';
 
 /** 船期表新旧对比:有船东配置走配置引擎,没有就走通用对比。 */
 export class ScheduleService {
@@ -236,35 +237,86 @@ export class ScheduleService {
    * 和 run() 的区别:不走固定键/固定列,规则完全来自 Skill 文本;
    * 结果是一份结构化差异清单(mode: 'skill'),同样能导出 xlsx。
    */
-  async compareWithSkill({ oldBuffer, oldName, newBuffer, newName, skill, carrierId = '', carrierName = '' }) {
-    const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
-    if (!availability.available) throw new HttpError(400, availability.reason);
+  async compareWithSkill({
+    oldBuffer,
+    oldName,
+    newBuffer,
+    newName,
+    skill,
+    carrierId = '',
+    carrierName = '',
+    executeScripts = false,
+  }) {
     if (!skill?.body) throw new HttpError(400, '请先导入 Skill 文件');
     const startedAt = Date.now();
     const carrier = carrierId ? this.db.getCarrier(carrierId) : null;
-    // 技能包落盘留档:以后能回看这次到底用了哪份 Skill。
-    const skillDir = this.saveSkillPackage(skill);
-    const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
-    const newSheets = readSheets(await workbookOf(newBuffer, newName));
-    if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
-
-    const { prompt, truncated, rows } = buildSkillPrompt({
-      skill,
-      oldName,
-      newName,
-      oldWorkbook: oldSheets,
-      newWorkbook: newSheets,
-      carrierName: carrier?.name ?? carrierName,
-    });
-    const text = await this.llm.complete({ system: SKILL_SYSTEM_PROMPT, prompt, temperature: 0.2 });
-    const parsed = parseSkillResult(text);
-    if (!parsed) throw new HttpError(502, '模型没有返回可用的对比结果,换个 Skill 或再试一次');
-
     const id = randomUUID();
     const dir = ensureDir(this.runDir(id));
-    fs.writeFileSync(path.join(dir, `old-${slugify(path.basename(oldName || 'old.xlsx'))}`), oldBuffer);
-    fs.writeFileSync(path.join(dir, `new-${slugify(path.basename(newName || 'new.xlsx'))}`), newBuffer);
+    const oldPath = path.join(dir, `old-${slugify(path.basename(oldName || 'old.xlsx'))}`);
+    const newPath = path.join(dir, `new-${slugify(path.basename(newName || 'new.xlsx'))}`);
+    fs.writeFileSync(oldPath, oldBuffer);
+    fs.writeFileSync(newPath, newBuffer);
     fs.writeFileSync(path.join(dir, `skill-${slugify(path.basename(skill.filename || 'skill.md'))}`), skill.body);
+    // 技能包落盘留档:以后能回看这次到底用了哪份 Skill。
+    const skillDir = this.saveSkillPackage(skill);
+
+    // ---- 优先执行技能包脚本:产出格式由脚本决定,提示词复述不来 ----
+    let execution = null;
+    let parsed = null;
+    let modelUsed = null;
+    const entryScript = executeScripts ? detectEntryScript(skill) : null;
+    if (entryScript && skillDir) {
+      try {
+        execution = await runSkillScript({
+          skillDir,
+          script: entryScript,
+          oldFile: oldPath,
+          newFile: newPath,
+          outDir: path.join(dir, 'out'),
+        });
+      } catch (error) {
+        execution = { script: entryScript, code: -1, error: error.message, outputs: [] };
+      }
+      if (execution.outputs?.length) {
+        parsed = {
+          summary: `已执行技能脚本 ${entryScript}(退出码 ${execution.code}),生成 ${execution.outputs.length} 个文件。`,
+          markdown: '',
+          stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
+          items: [],
+          rules: [],
+        };
+      }
+    }
+
+    // ---- 没有脚本产物(或未允许执行)时,回落到模型按 Skill 对比 ----
+    if (!parsed) {
+      const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
+      modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
+      if (!availability.available) {
+        const reason = execution?.error
+          ? `技能脚本执行失败(${execution.error}),且没有可用模型可以兜底`
+          : availability.reason;
+        throw new HttpError(400, reason);
+      }
+      const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
+      const newSheets = readSheets(await workbookOf(newBuffer, newName));
+      if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
+      const built = buildSkillPrompt({
+        skill,
+        oldName,
+        newName,
+        oldWorkbook: oldSheets,
+        newWorkbook: newSheets,
+        carrierName: carrier?.name ?? carrierName,
+      });
+      const text = await this.llm.complete({ system: SKILL_SYSTEM_PROMPT, prompt: built.prompt, temperature: 0.2 });
+      parsed = parseSkillResult(text);
+      if (!parsed) throw new HttpError(502, '模型没有返回可用的对比结果,换个 Skill 或再试一次');
+      parsed.promptChars = built.prompt.length;
+      parsed.tableRows = built.rows;
+      parsed.truncated = built.truncated;
+    }
+
     const record = {
       id,
       mode: 'skill',
@@ -276,14 +328,18 @@ export class ScheduleService {
       today: todayIso(),
       skill: { ...skillMeta(skill), dir: skillDir },
       summary: parsed.summary,
+      markdown: parsed.markdown ?? '',
       digest: parsed.summary,
       stats: { ...parsed.stats, skipped: 0 },
       items: parsed.items,
       rules: parsed.rules,
-      truncated,
-      promptChars: prompt.length,
-      tableRows: rows,
-      model: { provider: availability.provider ?? '', model: availability.model ?? '' },
+      truncated: Boolean(parsed.truncated),
+      promptChars: parsed.promptChars ?? 0,
+      tableRows: parsed.tableRows ?? 0,
+      // 脚本执行明细:退出码、stdout/stderr、产物文件(界面提供下载)。
+      execution,
+      outputFiles: (execution?.outputs ?? []).map((file) => ({ name: file.name, size: file.size })),
+      model: modelUsed,
       sheets: [],
       durationMs: Date.now() - startedAt,
     };
@@ -294,13 +350,33 @@ export class ScheduleService {
       kind: 'schedule',
       title: `${carrier ? `${carrier.name} · ` : ''}${record.oldName} → ${record.newName} · Skill:${skill.name}`,
       source: 'skill',
-      inputs: { oldName, newName, carrierId: carrier?.id ?? '', skill: { name: skill.name, hash: skill.hash } },
+      inputs: {
+        oldName,
+        newName,
+        carrierId: carrier?.id ?? '',
+        skill: { name: skill.name, hash: skill.hash },
+        executeScripts: Boolean(executeScripts),
+      },
       stats: record.stats,
-      detail: { mode: 'skill', skill: skill.name, truncated, items: record.items.length },
+      detail: {
+        mode: 'skill',
+        skill: skill.name,
+        truncated: record.truncated,
+        items: record.items.length,
+        script: execution?.script ?? '',
+      },
       createdAt: record.generatedAt,
       durationMs: record.durationMs,
     });
     return record;
+  }
+
+  /** 读一次脚本产物(界面下载用),名字限定在 run 的 out/ 下。 */
+  outputFile(id, name) {
+    const safe = path.basename(String(name ?? ''));
+    const file = path.join(this.runDir(id), 'out', safe);
+    if (!safe || !fs.existsSync(file)) throw new HttpError(404, '产物文件不存在');
+    return { buffer: fs.readFileSync(file), filename: safe };
   }
 
   /** 把技能包解出来的文件存到 `schedule/skills/<hash>/`,便于复用与审计。 */

@@ -298,8 +298,15 @@ async function handleApi(req, res, url, route, services) {
         newName: newFile.filename ?? 'new.xlsx',
         skill,
         carrierId: String(fields.carrierId ?? '').trim(),
+        executeScripts: fields.executeScripts === '1' || fields.executeScripts === 'true',
       });
       return sendJson(res, 200, { result, runs: schedule.listRuns({ limit: 20 }).items });
+    }
+
+    // 技能脚本产物下载
+    if (rest[0] === 'runs' && rest[1] && rest[2] === 'outputs' && rest[3] && method === 'GET') {
+      const { buffer, filename } = schedule.outputFile(rest[1], rest[3]);
+      return sendDownload(res, buffer, filename);
     }
 
     // 结构体检:能不能按现有配置认出来;认不出来就请模型给列映射。

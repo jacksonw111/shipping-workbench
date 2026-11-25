@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readWorkbook } from './workbook.js';
+import { readWorkbookDetailed } from './workbook.js';
 import { readZip } from '../util/zip.js';
 
 /**
@@ -24,7 +24,7 @@ const TEXT_EXTENSIONS = new Set(['.md', '.markdown', '.txt', '.json', '.csv', '.
 /** 技能包里的脚本:只列清单,不执行(执行用户上传的脚本需要单独开关)。 */
 const SCRIPT_EXTENSIONS = new Set(['.py', '.js', '.mjs', '.cjs', '.sh', '.bash', '.ps1', '.bat', '.cmd']);
 /** 每次喂给模型的最大字符数(两份表 + 技能)。超出会截断并告知模型。 */
-export const DEFAULT_PROMPT_BUDGET = 60_000;
+export const DEFAULT_PROMPT_BUDGET = 120_000;
 
 export const SKILL_SYSTEM_PROMPT = [
   '你是船期表对比专家。用户会给你一份「对比技能(Skill)」和两份船期表(旧版/新版)。',
@@ -39,6 +39,9 @@ export const SKILL_SYSTEM_PROMPT = [
   ' "items":[{"sheet":"工作表名","key":"这条记录怎么认出来的","status":"新增|删除|变更",',
   '           "changes":[{"field":"字段","from":"旧值","to":"新值"}],"note":"不超过 30 字"}],',
   ' "rules":["本次实际用到的 Skill 规则要点,最多 5 条"]}',
+  '',
+  '如果 Skill 规定了输出格式(分节、表格、统计口径),必须照它的格式写进 report;',
+  '不要把结果改写成「新增/删除/变更」三行清单。',
   '',
   '约束:',
   '- status 只能是 新增 / 删除 / 变更 三者之一。',
@@ -198,20 +201,26 @@ function cellToText(value) {
  * 把工作簿渲染成紧凑文本:`[sheet] 表头 | ...` + 编号行。
  * 超过 maxRows / maxChars 会截断,并回报 truncated,提示词里会告诉模型。
  */
-export function workbookToText(sheets, { maxRows = 220, maxSheets = 4, maxChars = 30_000 } = {}) {
+export function workbookToText(sheets, { maxRows = 600, maxSheets = 6, maxChars = 60_000 } = {}) {
   const blocks = [];
   let chars = 0;
   let truncated = false;
   let usedRows = 0;
+  let hiddenCount = 0;
   for (const sheet of (sheets ?? []).slice(0, maxSheets)) {
-    const rows = (sheet.rows ?? []).filter((row) => (row ?? []).some((cell) => cellToText(cell) !== ''));
-    const header = (sheet.header ?? sheet.rows?.[0] ?? []).map(cellToText);
-    const body = rows.slice(0, maxRows);
+    const source = (sheet.rows ?? [])
+      .map((row, index) => ({ row, hidden: Boolean(sheet.hiddenRows?.[index]) }))
+      .filter((item) => (item.row ?? []).some((cell) => cellToText(cell) !== ''));
+    const header = (sheet.header ?? source[0]?.row ?? []).map(cellToText);
+    const body = source.slice(0, maxRows);
     const lines = [`### 工作表:${sheet.name}`, `表头: ${header.join(' | ')}`];
-    body.forEach((row, index) => {
-      lines.push(`${index + 1}) ${row.map(cellToText).join(' | ')}`);
+    body.forEach((item, index) => {
+      // 隐藏行必须标出来:Skill 常按 hidden="1" 剔除无效航线。
+      const marker = item.hidden ? '(隐藏) ' : '';
+      if (item.hidden) hiddenCount += 1;
+      lines.push(`${index + 1}) ${marker}${item.row.map(cellToText).join(' | ')}`);
     });
-    if (rows.length > body.length) truncated = true;
+    if (source.length > body.length) truncated = true;
     const block = lines.join('\n');
     if (chars + block.length > maxChars) {
       truncated = true;
@@ -223,13 +232,15 @@ export function workbookToText(sheets, { maxRows = 220, maxSheets = 4, maxChars 
     chars += block.length;
     usedRows += body.length;
   }
-  return { text: blocks.join('\n\n'), truncated, rows: usedRows };
+  return { text: blocks.join('\n\n'), truncated, rows: usedRows, hiddenRows: hiddenCount };
 }
 
 /** 组装用户消息:Skill 在前,两份表在后。 */
 export function buildSkillPrompt({ skill, oldName, newName, oldWorkbook, newWorkbook, carrierName = '' }) {
   const oldText = workbookToText(oldWorkbook);
-  const newText = workbookToText(newWorkbook, { maxChars: Math.max(8000, 30_000 - oldText.text.length) });
+  const newText = workbookToText(newWorkbook, {
+    maxChars: Math.max(20_000, DEFAULT_PROMPT_BUDGET / 2 - oldText.text.length),
+  });
   const lines = [
     `船东:${carrierName || '未指定'}`,
     '',
@@ -249,6 +260,8 @@ export function buildSkillPrompt({ skill, oldName, newName, oldWorkbook, newWork
     }
   }
   lines.push(
+    '',
+    '表格中带 (隐藏) 前缀的行 = Excel 隐藏行;Skill 若要求按隐藏状态剔除航线,以此为准。',
     '',
     `===== 旧版文件:${oldName} =====`,
     oldText.text,
@@ -329,10 +342,13 @@ export function parseSkillResult(text, { limit = 300 } = {}) {
       }
     : counted;
   const summary = String(parsed.summary ?? '').trim();
-  if (!summary && items.length === 0) return null;
+  // Skill 可以只要求一份报告(不要求结构化条目),所以 report 也算有效结果。
+  const markdown = String(parsed.report ?? parsed.markdown ?? '').trim().slice(0, 40_000);
+  if (!summary && items.length === 0 && !markdown) return null;
   return {
     summary,
-    stats: { ...stats, sheets: new Set(items.map((item) => item.sheet).filter(Boolean)).size || 1 },
+    markdown,
+    stats: { ...stats, sheets: new Set(items.map((item) => item.sheet).filter(Boolean)).size || 0 },
     items,
     rules: (Array.isArray(parsed.rules) ? parsed.rules : [])
       .map((rule) => String(rule ?? '').trim().slice(0, 120))
@@ -353,7 +369,17 @@ export function exportSkillResult(record) {
       rows.push([item.sheet ?? '', item.key ?? '', item.status, change.field, change.from, change.to, item.note ?? '']);
     }
   }
+  const reportSheet = record.markdown
+    ? [
+        {
+          name: '报告',
+          columns: [{ header: '按 Skill 输出的报告', width: 100 }],
+          rows: String(record.markdown).split('\n').map((line) => [{ value: line }]),
+        },
+      ]
+    : [];
   return [
+    ...reportSheet,
     {
       name: 'Agent 对比',
       columns: [
@@ -377,5 +403,5 @@ export function exportSkillResult(record) {
 
 /** 供服务层读取 excel/pdf 统一的表格结构。 */
 export function readSheets(buffer) {
-  return readWorkbook(buffer).filter((sheet) => (sheet.rows ?? []).length > 0);
+  return readWorkbookDetailed(buffer).filter((sheet) => (sheet.rows ?? []).length > 0);
 }
