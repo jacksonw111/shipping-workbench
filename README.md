@@ -100,6 +100,55 @@ panda-skill.zip
 返回里带 `timings`(connect / login / select / search / fetch / store / total),界面的
 提示也会显示本轮耗时,慢的时候能直接看出卡在哪一段。
 
+## 内网 npm 安装(推荐给同事)
+
+包发布在 GitLab 项目级 npm Registry:
+
+```
+@internal-tools/shipping-workbench
+```
+
+**1. 配 registry 与只读 token**(一次性)。在 `~/.dsh/profiles/desktop/.npmrc` 写入:
+
+```ini
+@internal-tools:registry=https://git.witranscn.com/api/v4/projects/11/packages/npm/
+//git.witranscn.com/api/v4/projects/11/packages/npm/:_authToken=<npm-read token>
+```
+
+token 是项目里 `Settings → Repository → Deploy tokens` 的 **npm-read**
+(scope `read_package_registry`,只读、不能改代码)。同事不需要 GitLab 账号,有 token 就能装。
+
+**2. 在 DSH 里安装**:设置 → 插件 → 安装,填
+
+```
+@internal-tools/shipping-workbench
+```
+
+然后重启 DeepSeek Harness。
+
+**3. 升级**:
+
+```bash
+npm view @internal-tools/shipping-workbench version   # 看最新
+# DSH 里重新安装 @internal-tools/shipping-workbench@latest,或:
+cd ~/.dsh/profiles/desktop && pnpm update @internal-tools/shipping-workbench
+```
+
+再重启一次(后端代码启动时加载)。
+
+**4. 发新版本**(维护者):
+
+```bash
+GITLAB_HOST=git.witranscn.com \
+GITLAB_PROJECT=internal-tools/shipping-workbench \
+GITLAB_TOKEN=<有 write_package_registry 的 token> \
+node scripts/publish-gitlab-npm.mjs --version 0.13.0
+```
+
+脚本会:校验 Package Registry 已开启 → 复制发布目录并把包名改成 scoped →
+同步 `cordis.patch.yml` 的 `name` → `npm pack` + `npm publish`。
+发布后把版本号加在安装命令里即可(`@internal-tools/shipping-workbench@0.13.0`)。
+
 ## 跟随更新
 
 插件装进 profile 的是一份**副本**,不跟 git;更新分两层:
