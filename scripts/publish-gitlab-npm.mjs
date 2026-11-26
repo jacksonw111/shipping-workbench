@@ -79,6 +79,17 @@ if (fs.existsSync(patchFile)) {
   fs.writeFileSync(patchFile, patched);
 }
 
+// 客户端插件按**包名**注册;scoped 化之后必须同步 lib/client.js 的 id/name,
+// 否则宿主侧能加载(接口 200),但侧栏入口注册不上。
+const clientFile = path.join(temp, 'lib', 'client.js');
+if (fs.existsSync(clientFile)) {
+  const patchedClient = fs
+    .readFileSync(clientFile, 'utf8')
+    .replace(/id:\s*["']shipping-workbench["']/g, `id: "${manifest.name}"`)
+    .replace(/name:\s*["']shipping-workbench["']/g, `name: "${manifest.name}"`);
+  fs.writeFileSync(clientFile, patchedClient);
+}
+
 // ---- 发布 ----
 const npmrc = path.join(temp, '.npmrc');
 const registry = `${api}/projects/${project.id}/packages/npm/`;
