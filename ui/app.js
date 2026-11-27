@@ -1742,6 +1742,13 @@ function skillResultHtml(result) {
         <button class="btn" data-export-schedule>导出 xlsx</button>
       </div>
       ${
+        result.analysisSkipped
+          ? `<div class="banner banner-warn" style="margin-top:12px">
+              脚本产物已生成,但 AI 总结没有出来:${esc(result.analysisSkipped)}
+            </div>`
+          : ''
+      }
+      ${
         result.execution?.skipped
           ? `<div class="banner banner-warn" style="margin-top:12px">
               技能包里检测到脚本 <span class="mono">${esc(result.execution.script ?? '')}</span>,但本次没有执行——

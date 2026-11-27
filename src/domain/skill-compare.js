@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { readWorkbookDetailed } from './workbook.js';
 import { readZip } from '../util/zip.js';
 
@@ -170,6 +171,71 @@ export async function parseSkillPackage(buffer, filename = 'skill.zip') {
     scripts,
     files: entries.map((entry) => ({ path: entry.path, size: entry.size })),
   };
+}
+
+/** 脚本执行完之后,让模型读产物做总结(而不是只把文件丢给用户)。 */
+export const SKILL_OUTPUT_SYSTEM_PROMPT = [
+  '你是船期表对比专家。用户提供了一个「对比技能(Skill)」,其脚本已经按该技能跑完并生成了结果文件。',
+  '',
+  '你的任务:阅读结果文件的内容,用中文写清楚这次对比的结论。',
+  '1. 严格按 Skill 规定的口径和输出格式表达;Skill 有版式要求就照做。',
+  '2. 只讲产物里真实存在的内容,不要重复执行脚本,也不要编造数字。',
+  '3. 结果文件被截断时,在 summary 里说明。',
+  '',
+  '只输出 JSON:',
+  '{"summary":"3-6 句中文结论","report":"可选:按 Skill 格式排版的 Markdown","stats":{"added":0,"removed":0,"changed":0},',
+  ' "items":[{"sheet":"","key":"","status":"新增|删除|变更","changes":[{"field":"","from":"","to":""}],"note":""}],',
+  ' "rules":["本次结论依据的 Skill 规则,最多 5 条"]}',
+  'items 只在产物确实是增删改清单时才给;Skill 更偏报告时只写 summary/report 即可。',
+].join('\n');
+
+/**
+ * 把脚本产物读成文本给模型:表格解析成行,文本原样截断。
+ * @param outputs - `[{ name, size, path }]`
+ */
+export function outputsToText(outputs, { maxChars = 40000 } = {}) {
+  const blocks = [];
+  let used = 0;
+  for (const file of outputs ?? []) {
+    if (used >= maxChars) break;
+    const extension = extensionOf(file.name);
+    try {
+      if (['.xlsx', '.xls'].includes(extension)) {
+        const buffer = readFileSync(file.path);
+        const text = workbookToText(readSheets(buffer), { maxChars: maxChars - used }).text;
+        blocks.push(`### 产物:${file.name}\n${text}`);
+        used += text.length;
+      } else if (['.csv', '.txt', '.json', '.md', '.tsv'].includes(extension)) {
+        const text = normalizeText(readFileSync(file.path, 'utf8')).slice(0, maxChars - used);
+        blocks.push(`### 产物:${file.name}\n${text}`);
+        used += text.length;
+      } else {
+        blocks.push(`### 产物:${file.name}(${file.size ?? 0} 字节,未解析)`);
+      }
+    } catch (error) {
+      blocks.push(`### 产物:${file.name}(读取失败:${error.message})`);
+    }
+  }
+  return { text: blocks.join('\n\n'), truncated: used >= maxChars };
+}
+
+/** 脚本产物 + 技能 + stdout → 给模型的用户消息。 */
+export function buildSkillOutputPrompt({ skill, script = '', stdout = '', outputsText = '' }) {
+  return [
+    `===== 对比技能(Skill:${skill.name}) =====`,
+    skill.body,
+    '',
+    `===== 执行信息 =====`,
+    `脚本:${script}`,
+    stdout ? `脚本输出:\n${stdout}` : '',
+    '',
+    '===== 脚本产物内容 =====',
+    outputsText || '(产物无法解析成文本,只能依据脚本输出判断)',
+    '',
+    '按 Skill 的口径总结这次对比,只输出约定的 JSON。',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
 }
 
 /** 去掉 Buffer/长文本,只留能进接口与记录的元信息。 */

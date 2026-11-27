@@ -29,6 +29,9 @@ import {
   parseSkillResult,
   readSheets,
   skillMeta,
+  SKILL_OUTPUT_SYSTEM_PROMPT,
+  buildSkillOutputPrompt,
+  outputsToText,
 } from './skill-compare.js';
 import { detectEntryScript, runSkillScript } from './skill-runner.js';
 
@@ -283,13 +286,51 @@ export class ScheduleService {
         execution = { script: entryScript, code: -1, error: error.message, outputs: [] };
       }
       if (execution.outputs?.length) {
-        parsed = {
+        // 脚本只负责产出;结论由模型读产物来写,否则界面上就只剩「执行成功」四个字。
+        const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
+        let analyzed = null;
+        let analysisSkipped = '';
+        if (availability.available) {
+          modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
+          try {
+            const outputsText = outputsToText(execution.outputs);
+            const text = await this.llm.complete({
+              system: SKILL_OUTPUT_SYSTEM_PROMPT,
+              prompt: buildSkillOutputPrompt({
+                skill,
+                script: entryScript,
+                stdout: execution.stdout ?? '',
+                outputsText: outputsText.text,
+              }),
+              temperature: 0.2,
+            });
+            analyzed = parseSkillResult(text);
+            // 模型偶尔不按 JSON 回:纯文本也当结论收下,不要把内容丢掉。
+            if (!analyzed && String(text ?? '').trim()) {
+              analyzed = {
+                summary: String(text).trim().slice(0, 800),
+                markdown: '',
+                stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
+                items: [],
+                rules: [],
+              };
+            }
+            if (!analyzed) analysisSkipped = '模型没有返回可用的总结';
+            else if (outputsText.truncated) analyzed.truncated = true;
+          } catch (error) {
+            analysisSkipped = error.message;
+          }
+        } else {
+          analysisSkipped = availability.reason;
+        }
+        parsed = analyzed ?? {
           summary: `已执行技能脚本 ${entryScript}(退出码 ${execution.code}),生成 ${execution.outputs.length} 个文件。`,
           markdown: '',
           stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
           items: [],
           rules: [],
         };
+        parsed.analysisSkipped = analysisSkipped;
       }
     }
 
@@ -344,6 +385,7 @@ export class ScheduleService {
       // 脚本执行明细:退出码、stdout/stderr、产物文件(界面提供下载)。
       execution,
       outputFiles: (execution?.outputs ?? []).map((file) => ({ name: file.name, size: file.size })),
+      analysisSkipped: parsed.analysisSkipped ?? '',
       model: modelUsed,
       sheets: [],
       durationMs: Date.now() - startedAt,
