@@ -684,6 +684,33 @@ async function openArticle(accountId, key) {
   }
 }
 
+/** 正文里的 [n] 变成链到原文的角标;解析不出来的编号只留文字,不当链接。 */
+function renderHotspotBody(body, cited = []) {
+  const hrefs = new Map((cited ?? []).filter((item) => item.url).map((item) => [item.n, item.url]));
+  const blocks = esc(String(body ?? ''))
+    .trim()
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const html = blocks
+    .map((block) => {
+      if (/^#{1,4}\s+/.test(block)) return `<h3>${block.replace(/^#{1,4}\s+/, '')}</h3>`;
+      const lines = block.split('\n');
+      if (lines.length > 1 && lines.every((line) => /^[-*]\s+/.test(line))) {
+        return `<ul>${lines.map((line) => `<li>${line.replace(/^[-*]\s+/, '')}</li>`).join('')}</ul>`;
+      }
+      return `<p>${block.replace(/\n/g, '<br>')}</p>`;
+    })
+    .join('');
+  return html
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[(\d+)\]/g, (marker, n) => {
+      const href = hrefs.get(Number(n));
+      if (!href) return `<span class="hot-cite">${marker}</span>`;
+      return `<a class="hot-cite" href="${esc(href)}" target="_blank" rel="noreferrer">${marker}</a>`;
+    });
+}
+
 /* --------------------------------------------------------- AI 热点追踪 */
 
 /** 正文里的 [n] 变成链到原文的角标;解析不出来的编号只留文字,不当链接。 */
