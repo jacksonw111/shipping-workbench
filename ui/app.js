@@ -1728,9 +1728,16 @@ function skillResultHtml(result) {
       <div class="row">
         <span class="chip chip-new">Skill · ${esc(skill.name ?? '')}</span>
         ${
+          result.engine
+            ? `<span class="chip ${result.engine === 'dsh-agent-loop' ? 'chip-ok' : 'chip-warn'}">${
+                result.engine === 'dsh-agent-loop' ? '官方 agentLoop' : esc(result.engine)
+              }</span>`
+            : ''
+        }
+        ${
           (skill.files ?? []).length
             ? `<span class="chip">${skill.files.length} 个文件${
-                (skill.scripts ?? []).length ? ` · ${skill.scripts.length} 个脚本(未执行)` : ''
+                (skill.scripts ?? []).length ? ` · ${skill.scripts.length} 个脚本` : ''
               }</span>`
             : ''
         }
