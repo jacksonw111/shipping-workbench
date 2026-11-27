@@ -381,3 +381,28 @@ test('Agent 流程:自己调脚本、自己收尾,记录工具步骤', async () 
   const out = service.outputFile(record.id, 'result.txt');
   assert.equal(out.buffer.toString('utf8'), '对比完成');
 });
+
+
+test('Agent 不会重复执行同一脚本,产物去重', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const replies = [
+    { text: '', toolCalls: [{ id: 'c1', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
+    { text: '', toolCalls: [{ id: 'c2', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
+    { text: '', toolCalls: [{ id: 'c3', name: 'finish', arguments: JSON.stringify({ summary: '同一脚本没有跑第二遍。' }) }] },
+  ];
+  const llm = agentStub(replies);
+  const service = new ScheduleService(db, home, llm);
+  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
+  const record = await service.compareWithSkill({
+    oldBuffer: xlsx(OLD_ROWS),
+    oldName: 'old.xlsx',
+    newBuffer: xlsx(NEW_ROWS),
+    newName: 'new.xlsx',
+    skill: pkg,
+  });
+  assert.match(record.summary, /同一脚本/);
+  assert.equal(record.executions ?? 1, 1);
+  assert.equal(record.outputFiles.length, 1);
+  assert.equal(record.steps.filter((step) => step.tool === 'run_script').length, 1);
+});

@@ -285,7 +285,12 @@ export class ScheduleService {
       });
       execution = agent.executions.at(-1) ?? null;
       agentSteps = agent.steps;
-      outputFiles = agent.outputs;
+      const seen = new Set();
+      outputFiles = agent.outputs.filter((file) => {
+        if (seen.has(file.name)) return false;
+        seen.add(file.name);
+        return true;
+      });
       parsed = {
         summary: agent.stopped === 'max-steps' ? `${agent.summary}\n(达到步数上限,结论可能不完整)` : agent.summary,
         markdown: agent.markdown,

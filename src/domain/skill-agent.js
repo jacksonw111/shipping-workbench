@@ -19,6 +19,7 @@ export const SKILL_AGENT_SYSTEM_PROMPT = [
   '2. 用工具一步一步做:需要原始数据就 read_file,Skill 里有脚本且脚本就是流程的一部分就 run_script,',
   '   需要看中间结果就再 read_file。不要跳过 Skill 明确要求的步骤。',
   '3. 每一步只做一件事,拿到结果再决定下一步;脚本失败就换一种方式继续,不要假装成功。',
+  '   同一个脚本最多执行一次(工具会拒绝重复执行);脚本的产出内容会直接返回给你,不需要再读一遍。',
   '4. 收尾必须调用 finish,给出 summary(中文结论),需要时给 report(Markdown,按 Skill 的版式)、',
   '   items(增删改清单)、stats(计数)、rules(依据的 Skill 规则)。',
   '',
@@ -117,7 +118,7 @@ export const SKILL_AGENT_TOOLS = [
   },
 ];
 
-const MAX_STEPS = 8;
+const MAX_STEPS = 10;
 const TEXT_LIMIT = 20000;
 
 function listTree(root, { depth = 2, limit = 80 } = {}) {
@@ -166,6 +167,7 @@ export async function runSkillAgent({
   mkdirSync(outDir, { recursive: true });
   const executions = [];
   const steps = [];
+  const ranScripts = new Set();
 
   const skillFiles = skillDir && existsSync(skillDir) ? listTree(skillDir) : (skill.files ?? []).map((file) => file.path);
   const task = [
@@ -243,6 +245,10 @@ export async function runSkillAgent({
       if (!skillDir) return { text: '技能包没有落盘,无法执行脚本', isError: true };
       const script = String(args.script ?? '').trim();
       if (!script) return { text: '缺少 script', isError: true };
+      if (ranScripts.has(script)) {
+        return { text: `脚本 ${script} 本次已经执行过,不要重复执行。产物在 out/ 目录,直接读取产物或调用 finish 收尾。` };
+      }
+      ranScripts.add(script);
       const extra = Array.isArray(args.args) ? args.args.map(String) : [];
       const execution = await runSkillScript({
         skillDir,
@@ -261,6 +267,16 @@ export async function runSkillAgent({
         execution.stderr ? `stderr:\n${execution.stderr}` : '',
         `产出:${(execution.outputs ?? []).map((file) => `${file.name}(${file.size} 字节)`).join(', ') || '(无)'}`,
       ].filter(Boolean);
+      // 产物内容直接回灌:模型不必再为了「看看结果」多走一步。
+      for (const file of execution.outputs ?? []) {
+        const extension = path.extname(file.name).toLowerCase();
+        if (['.xlsx', '.xls'].includes(extension)) {
+          const text = readTable(file.path, '', 120);
+          if (text) lines.push(`\n${file.name} 内容(前 120 行/页):\n${text.slice(0, 8000)}`);
+        } else if (['.csv', '.txt', '.json', '.md', '.tsv'].includes(extension)) {
+          lines.push(`\n${file.name} 内容:\n${readFileSync(file.path, 'utf8').slice(0, 6000)}`);
+        }
+      }
       return { text: lines.join('\n'), isError: execution.code !== 0 };
     }
     if (name === 'write_file') {
@@ -273,7 +289,19 @@ export async function runSkillAgent({
 
   let finish = null;
   for (let step = 0; step < maxSteps; step += 1) {
-    const reply = await llm.streamAgent({ system: SKILL_AGENT_SYSTEM_PROMPT, messages, tools: SKILL_AGENT_TOOLS });
+    const lastChance = step === maxSteps - 1;
+    if (lastChance) {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: '步骤快用完了。现在只调用 finish,给出 summary(以及 report/stats/items),不要再调用其他工具。' }],
+      });
+    }
+    const reply = await llm.streamAgent({
+      system: SKILL_AGENT_SYSTEM_PROMPT,
+      messages,
+      // 最后一步只留 finish,逼出结论。
+      tools: lastChance ? SKILL_AGENT_TOOLS.filter((tool) => tool.name === 'finish') : SKILL_AGENT_TOOLS,
+    });
     const calls = reply.toolCalls ?? [];
     const content = [];
     if (reply.text) content.push({ type: 'text', text: reply.text });
