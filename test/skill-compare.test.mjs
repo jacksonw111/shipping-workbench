@@ -286,30 +286,11 @@ test('执行技能脚本:产出文件落 out/,可下载', async () => {
   assert.equal(record.outputFiles.length, 1);
   assert.equal(record.outputFiles[0].name, 'result.txt');
   assert.match(record.summary, /已执行技能脚本/);
-  assert.match(record.analysisSkipped, /没有挂载模型|没有可用模型/);
   const file = service.outputFile(record.id, 'result.txt');
   assert.equal(file.buffer.toString('utf8'), '对比完成');
   assert.throws(() => service.outputFile(record.id, '../result.json'), /不存在/);
 });
 
-test('不执行脚本且没有模型时,给可读的 400', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
-  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const service = new ScheduleService(db, home, { availability: () => ({ available: false, reason: '没有模型' }) });
-  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
-  await assert.rejects(
-    () =>
-      service.compareWithSkill({
-        oldBuffer: xlsx(OLD_ROWS),
-        oldName: 'old.xlsx',
-        newBuffer: xlsx(NEW_ROWS),
-        newName: 'new.xlsx',
-        skill: pkg,
-        executeScripts: false,
-      }),
-    (error) => error.status === 400 && /没有模型/.test(error.message),
-  );
-});
 
 
 test('默认行为:技能包有脚本就直接执行,不需要前端传开关', async () => {
@@ -328,45 +309,61 @@ test('默认行为:技能包有脚本就直接执行,不需要前端传开关', 
   assert.equal(record.outputFiles.length, 1);
 });
 
-test('显式关闭执行时,记录里标明跳过原因', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
-  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const service = new ScheduleService(db, home, {
-    availability: () => ({ available: true, provider: 'p', model: 'm' }),
-    complete: async () => JSON.stringify({ summary: '模型结果', report: '# 报告', items: [] }),
-  });
-  const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
-  const record = await service.compareWithSkill({
-    oldBuffer: xlsx(OLD_ROWS),
-    oldName: 'old.xlsx',
-    newBuffer: xlsx(NEW_ROWS),
-    newName: 'new.xlsx',
-    skill: pkg,
-    executeScripts: false,
-  });
-  assert.equal(record.execution.skipped, true);
-  assert.match(record.execution.reason, /未启用/);
-  assert.equal(record.markdown, '# 报告');
-});
 
 
-test('脚本执行后,由模型读产物写结论', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
-  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const seen = [];
-  const llm = {
+
+
+function agentStub(replies) {
+  let index = 0;
+  return {
     availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
-    complete: async ({ system, prompt }) => {
-      seen.push({ system, prompt });
-      return JSON.stringify({
-        summary: '脚本产物显示 NOV↔NOV 无差异,NOV↔DEC 新增 ZX3。',
-        report: '## 结论\n- NOV-NOV:无差异\n- NOV-DEC:新增 ZX3',
-        stats: { added: 1, removed: 0, changed: 0 },
-        items: [],
-        rules: ['按 Skill 的变动1-4 口径'],
-      });
+    streamAgent: async () => {
+      const reply = replies[Math.min(index, replies.length - 1)];
+      index += 1;
+      return reply;
     },
   };
+}
+
+test('没有模型且技能包没有脚本时,给可读的 400', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const service = new ScheduleService(db, home, { availability: () => ({ available: false, reason: '没有模型' }) });
+  const pkg = await parseSkillPackage(buildZip([{ name: 'SKILL.md', data: SKILL }]), 'text-skill.zip');
+  await assert.rejects(
+    () =>
+      service.compareWithSkill({
+        oldBuffer: xlsx(OLD_ROWS),
+        oldName: 'old.xlsx',
+        newBuffer: xlsx(NEW_ROWS),
+        newName: 'new.xlsx',
+        skill: pkg,
+      }),
+    (error) => error.status === 400 && /没有模型/.test(error.message),
+  );
+});
+
+test('Agent 流程:自己调脚本、自己收尾,记录工具步骤', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
+  const db = new WorkbenchDb(path.join(home, 'workbench.db'));
+  const llm = agentStub([
+    { text: '先按 Skill 跑对比脚本', toolCalls: [{ id: 'c1', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
+    {
+      text: '',
+      toolCalls: [
+        {
+          id: 'c2',
+          name: 'finish',
+          arguments: JSON.stringify({
+            summary: '脚本产出 NOV-DEC 与 NOV-NOV 两页,NOV 无差异。',
+            report: '## 结论\n- NOV-NOV:无差异',
+            stats: { added: 0, removed: 0, changed: 0 },
+            rules: ['按 Skill 的变动1-4'],
+          }),
+        },
+      ],
+    },
+  ]);
   const service = new ScheduleService(db, home, llm);
   const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
   const record = await service.compareWithSkill({
@@ -376,11 +373,11 @@ test('脚本执行后,由模型读产物写结论', async () => {
     newName: 'new.xlsx',
     skill: pkg,
   });
+  assert.match(record.summary, /NOV 无差异/);
+  assert.match(record.markdown, /NOV-NOV/);
   assert.equal(record.execution.code, 0);
-  assert.match(record.summary, /NOV↔NOV 无差异/);
-  assert.match(record.markdown, /新增 ZX3/);
-  assert.equal(record.stats.added, 1);
-  assert.match(seen[0].system, /脚本已经按该技能跑完/);
-  assert.match(seen[0].prompt, /对比完成/);
-  assert.ok(record.outputFiles.length === 1);
+  assert.ok(record.steps.some((step) => step.tool === 'run_script' && step.ok));
+  assert.equal(record.outputFiles.length, 1);
+  const out = service.outputFile(record.id, 'result.txt');
+  assert.equal(out.buffer.toString('utf8'), '对比完成');
 });

@@ -1742,6 +1742,22 @@ function skillResultHtml(result) {
         <button class="btn" data-export-schedule>导出 xlsx</button>
       </div>
       ${
+        result.steps?.length
+          ? `<div class="banner" style="margin-top:12px">
+              <div class="row">
+                ${result.steps
+                  .map(
+                    (step) =>
+                      `<span class="chip ${step.ok ? 'chip-ok' : 'chip-danger'}">${esc(step.tool)}${
+                        step.target ? ` · ${esc(step.target)}` : ''
+                      }</span>`,
+                  )
+                  .join(' ')}
+              </div>
+            </div>`
+          : ''
+      }
+      ${
         result.analysisSkipped
           ? `<div class="banner banner-warn" style="margin-top:12px">
               脚本产物已生成,但 AI 总结没有出来:${esc(result.analysisSkipped)}

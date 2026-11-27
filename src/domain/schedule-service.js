@@ -34,6 +34,7 @@ import {
   outputsToText,
 } from './skill-compare.js';
 import { detectEntryScript, runSkillScript } from './skill-runner.js';
+import { runSkillAgent } from './skill-agent.js';
 
 /** 船期表新旧对比:有船东配置走配置引擎,没有就走通用对比。 */
 export class ScheduleService {
@@ -263,87 +264,38 @@ export class ScheduleService {
     // 技能包落盘留档:以后能回看这次到底用了哪份 Skill。
     const skillDir = this.saveSkillPackage(skill);
 
-    // ---- 优先执行技能包脚本:产出格式由脚本决定,提示词复述不来 ----
+    // ---- Skill 就是流程:交给 Agent,由它自己决定读什么、跑不跑脚本 ----
     let execution = null;
     let parsed = null;
     let modelUsed = null;
-    // 默认「有脚本就执行」:之前的默认关闭导致用户导入带脚本的技能包却走了模型,结果对不上。
-    const entryScript = detectEntryScript(skill);
-    const shouldRun = executeScripts === undefined ? Boolean(entryScript) : Boolean(executeScripts);
-    if (entryScript && !shouldRun) {
-      execution = { skipped: true, script: entryScript, reason: '技能包内有脚本,但本次未启用执行' };
-    }
-    if (entryScript && shouldRun && skillDir) {
-      try {
-        execution = await runSkillScript({
-          skillDir,
-          script: entryScript,
-          oldFile: oldPath,
-          newFile: newPath,
-          outDir: path.join(dir, 'out'),
-        });
-      } catch (error) {
-        execution = { script: entryScript, code: -1, error: error.message, outputs: [] };
-      }
-      if (execution.outputs?.length) {
-        // 脚本只负责产出;结论由模型读产物来写,否则界面上就只剩「执行成功」四个字。
-        const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
-        let analyzed = null;
-        let analysisSkipped = '';
-        if (availability.available) {
-          modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
-          try {
-            const outputsText = outputsToText(execution.outputs);
-            const text = await this.llm.complete({
-              system: SKILL_OUTPUT_SYSTEM_PROMPT,
-              prompt: buildSkillOutputPrompt({
-                skill,
-                script: entryScript,
-                stdout: execution.stdout ?? '',
-                outputsText: outputsText.text,
-              }),
-              temperature: 0.2,
-            });
-            analyzed = parseSkillResult(text);
-            // 模型偶尔不按 JSON 回:纯文本也当结论收下,不要把内容丢掉。
-            if (!analyzed && String(text ?? '').trim()) {
-              analyzed = {
-                summary: String(text).trim().slice(0, 800),
-                markdown: '',
-                stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
-                items: [],
-                rules: [],
-              };
-            }
-            if (!analyzed) analysisSkipped = '模型没有返回可用的总结';
-            else if (outputsText.truncated) analyzed.truncated = true;
-          } catch (error) {
-            analysisSkipped = error.message;
-          }
-        } else {
-          analysisSkipped = availability.reason;
-        }
-        parsed = analyzed ?? {
-          summary: `已执行技能脚本 ${entryScript}(退出码 ${execution.code}),生成 ${execution.outputs.length} 个文件。`,
-          markdown: '',
-          stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
-          items: [],
-          rules: [],
-        };
-        parsed.analysisSkipped = analysisSkipped;
-      }
-    }
+    let agentSteps = [];
+    let outputFiles = [];
+    const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
 
-    // ---- 没有脚本产物(或未允许执行)时,回落到模型按 Skill 对比 ----
-    if (!parsed) {
-      const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
+    if (availability.available && typeof this.llm?.streamAgent === 'function') {
       modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
-      if (!availability.available) {
-        const reason = execution?.error
-          ? `技能脚本执行失败(${execution.error}),且没有可用模型可以兜底`
-          : availability.reason;
-        throw new HttpError(400, reason);
-      }
+      const agent = await runSkillAgent({
+        llm: this.llm,
+        skill,
+        skillDir,
+        oldPath,
+        newPath,
+        runDir: dir,
+        outDir: path.join(dir, 'out'),
+      });
+      execution = agent.executions.at(-1) ?? null;
+      agentSteps = agent.steps;
+      outputFiles = agent.outputs;
+      parsed = {
+        summary: agent.stopped === 'max-steps' ? `${agent.summary}\n(达到步数上限,结论可能不完整)` : agent.summary,
+        markdown: agent.markdown,
+        stats: agent.stats,
+        items: agent.items,
+        rules: agent.rules,
+      };
+    } else if (availability.available) {
+      // 老路径:模型不支持工具调用时,退回「一份提示词 + 两份表」。
+      modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
       const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
       const newSheets = readSheets(await workbookOf(newBuffer, newName));
       if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
@@ -361,6 +313,29 @@ export class ScheduleService {
       parsed.promptChars = built.prompt.length;
       parsed.tableRows = built.rows;
       parsed.truncated = built.truncated;
+    } else {
+      // 没有模型:只能执行技能脚本,否则无法按 Skill 对比。
+      const entryScript = detectEntryScript(skill);
+      if (!entryScript || !skillDir) throw new HttpError(400, availability.reason ?? '当前 profile 没有挂载模型服务');
+      try {
+        execution = await runSkillScript({
+          skillDir,
+          script: entryScript,
+          oldFile: oldPath,
+          newFile: newPath,
+          outDir: path.join(dir, 'out'),
+        });
+      } catch (error) {
+        throw new HttpError(400, `技能脚本执行失败(${error.message}),且没有可用模型可以兜底`);
+      }
+      outputFiles = execution.outputs ?? [];
+      parsed = {
+        summary: `已执行技能脚本 ${entryScript}(退出码 ${execution.code}),生成 ${outputFiles.length} 个文件。(没有可用模型,未生成文字结论)`,
+        markdown: '',
+        stats: { added: 0, removed: 0, changed: 0, sheets: 0 },
+        items: [],
+        rules: [],
+      };
     }
 
     const record = {
@@ -384,8 +359,9 @@ export class ScheduleService {
       tableRows: parsed.tableRows ?? 0,
       // 脚本执行明细:退出码、stdout/stderr、产物文件(界面提供下载)。
       execution,
-      outputFiles: (execution?.outputs ?? []).map((file) => ({ name: file.name, size: file.size })),
-      analysisSkipped: parsed.analysisSkipped ?? '',
+      steps: agentSteps,
+      outputFiles: outputFiles.map((file) => ({ name: file.name, size: file.size })),
+      analysisSkipped: '',
       model: modelUsed,
       sheets: [],
       durationMs: Date.now() - startedAt,
