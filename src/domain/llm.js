@@ -240,41 +240,6 @@ export class LlmChecker {
     return this.streamText(request(true), () => request(false));
   }
 
-  /**
-   * 一次带工具的模型调用:返回文本 + 工具调用,由调用方执行工具后再喂回来。
-   * 这是 Skill Agent 循环的唯一入口,不要在这里做循环。
-   */
-  async streamAgent({ system, messages, tools, temperature = 0.2 } = {}) {
-    const availability = this.availability();
-    if (!availability.available) throw new Error(availability.reason);
-    const selection = this.selection();
-    const request = {
-      provider: selection.provider,
-      model: selection.model,
-      temperature,
-      system,
-      messages,
-      ...(tools?.length ? { tools } : {}),
-    };
-    let text = '';
-    const calls = new Map();
-    for await (const chunk of this.llm.stream(request)) {
-      if (chunk.type === 'text-delta') text += chunk.text ?? '';
-      else if (chunk.type === 'tool-call-delta') {
-        const index = chunk.index ?? calls.size;
-        const current = calls.get(index) ?? { id: chunk.id ?? `call-${index}`, name: '', arguments: '' };
-        if (chunk.id) current.id = chunk.id;
-        if (chunk.name) current.name = chunk.name;
-        current.arguments += chunk.argumentsDelta ?? '';
-        calls.set(index, current);
-      } else if (chunk.type === 'finish') {
-        if (chunk.reason?.kind === 'error') throw new Error(chunk.reason.failure?.message ?? '模型调用失败');
-        if (chunk.reason?.kind === 'aborted') throw new Error('模型调用被中断');
-      }
-    }
-    return { text, toolCalls: [...calls.values()].filter((call) => call.name) };
-  }
-
   /** 读一次流式回复;模型不支持 reasoningEffort 时降级重试一次。 */
   async streamText(request, fallback) {
     let text = '';

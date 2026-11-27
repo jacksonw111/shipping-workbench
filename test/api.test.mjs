@@ -42,6 +42,36 @@ function stubGateway() {
   };
 }
 
+/** 假的 DSH agent 上下文:followup 时直接调用 finish,用于验证接口接线。 */
+function fakeAgentCtx(result) {
+  const registry = new Map();
+  const tools = {
+    register: (definition) => {
+      registry.set(definition.name, definition);
+      return () => registry.delete(definition.name);
+    },
+    restrict: () => () => {},
+  };
+  const agentLoop = {
+    createAgent: async (_ownerCtx, options) => {
+      await options.setup?.({ tools, systemPrompt: { section: () => () => {} } });
+      let work = Promise.resolve();
+      return {
+        agent: {
+          followup: () => {
+            work = registry.get('finish').execute(result, { concludeTurn() {} });
+          },
+          whenIdle: async () => {
+            await work;
+          },
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  return { get: (name) => ({ agentLoop, tools })[name] };
+}
+
 function startServer(home, options = {}) {
   const settings = new SettingsStore(home);
   const db = new WorkbenchDb(path.join(home, 'workbench.db'));
@@ -53,7 +83,7 @@ function startServer(home, options = {}) {
     apply: () => {},
   };
   const track = new TrackService(db, home, congestion, llm);
-  const schedule = new ScheduleService(db, home, llm);
+  const schedule = new ScheduleService(db, home, llm, options.scheduleCtx ?? null);
   const mail = new MailService(home, settings);
   const hotspot = new HotspotService(db, llm, home);
   const handler = createHandler({ settings, wechat, track, schedule, congestion, mail, llm, hotspot, db, updater: options.updater });
@@ -490,7 +520,13 @@ test('Skill 对比接口:缺文件 400,带 Skill 时按模型结果返回', asyn
       });
     },
   };
-  const server = await startServer(home, { llm });
+  const scheduleCtx = fakeAgentCtx({
+    summary: '开航推迟一天。',
+    stats: { added: 0, removed: 0, changed: 1 },
+    items: [{ sheet: '美西', key: 'MSC ANA/001E', status: '变更', note: '开航日期 12-01 → 12-02' }],
+    rules: ['按船名+航次配对'],
+  });
+  const server = await startServer(home, { llm, scheduleCtx });
   const base = `http://127.0.0.1:${server.address().port}/shipping-workbench/api`;
   const sheet = (date) => workbookBuffer([['船名', '航次', '开航日期'], ['MSC ANA', '001E', date]], '美西');
   try {
@@ -510,7 +546,7 @@ test('Skill 对比接口:缺文件 400,带 Skill 时按模型结果返回', asyn
     assert.equal(data.result.mode, 'skill');
     assert.equal(data.result.stats.changed, 1);
     assert.equal(data.result.skill.name, '技能');
-    assert.match(seen[0].prompt, /按船名\+航次配对/);
+    assert.equal(data.result.engine, 'dsh-agent-loop');
   } finally {
     server.close();
   }

@@ -46,7 +46,7 @@ function mount(ctx, config = {}) {
   const llm = new LlmChecker(home, ctx);
   const hotspot = new HotspotService(db, llm, home);
   const track = new TrackService(db, home, congestion, llm, settings);
-  const schedule = new ScheduleService(db, home, llm);
+  const schedule = new ScheduleService(db, home, llm, ctx);
   // 已安装的插件目录:bundle 里是 lib/ 的上一级,源码直跑时是 src/ 的上一级。
   const appDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const updater = new Updater({ appDir, home, source: settings.read().update ?? {} });

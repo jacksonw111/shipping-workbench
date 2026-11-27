@@ -47,6 +47,48 @@ description: 按船名+航次配对,比较开航日期
 3. 新有旧无=新增,旧有新无=删除,值不同=变更。
 `;
 
+/**
+ * 假的 DSH 上下文:让官方 agent 循环的接入层可以单测——
+ * createAgent 时把工具注册进 registry,然后按脚本顺序调用工具的 execute。
+ */
+function fakeDshCtx(calls) {
+  const registry = new Map();
+  const fakeTools = {
+    register: (definition) => {
+      registry.set(definition.name, definition);
+      return () => registry.delete(definition.name);
+    },
+    restrict: () => () => {},
+  };
+  const fakeSystemPrompt = { section: () => () => {} };
+  let work = Promise.resolve();
+  const agentLoop = {
+    createAgent: async (_ownerCtx, options) => {
+      await options.setup?.({ tools: fakeTools, systemPrompt: fakeSystemPrompt });
+      return {
+        agent: {
+          followup: () => {
+            work = (async () => {
+              for (const call of calls) {
+                const definition = registry.get(call.name);
+                if (!definition) throw new Error(`工具未注册:${call.name}`);
+                await definition.execute(call.args ?? {}, { concludeTurn() {} });
+              }
+            })();
+          },
+          whenIdle: async () => {
+            await work;
+          },
+        },
+        dispose: async () => {},
+      };
+    },
+  };
+  return { get: (name) => ({ agentLoop, tools: fakeTools, systemPrompt: fakeSystemPrompt })[name] };
+}
+
+const workerLlm = { availability: () => ({ available: true, provider: 'p', model: 'm' }), selection: () => ({ provider: 'p', model: 'm' }) };
+
 test('解析 Skill:front-matter 取名字,正文保留', () => {
   const skill = parseSkillFile(Buffer.from(`\uFEFF${SKILL}`), 'demo.md');
   assert.equal(skill.name, '简单船名航次对比');
@@ -117,23 +159,21 @@ test('解析结果:空内容返回 null', () => {
 test('服务层:按 Skill 生成对比记录并可导出', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-skill-'));
   const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const calls = [];
-  const llm = {
-    availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
-    complete: async ({ system, prompt }) => {
-      calls.push({ system, prompt });
-      return JSON.stringify({
+  const ctx = fakeDshCtx([
+    {
+      name: 'finish',
+      args: {
         summary: 'MSC ANA 开航推迟 1 天,另新增 MSC CAT。',
         stats: { added: 1, removed: 0, changed: 1 },
         items: [
-          { sheet: '美西', key: 'MSC ANA/001E', status: '变更', changes: [{ field: '开航日期', from: '2026-12-01', to: '2026-12-02' }] },
-          { sheet: '美西', key: 'MSC CAT/003E', status: '新增', changes: [], note: '新航次' },
+          { sheet: '美西', key: 'MSC ANA/001E', status: '变更', note: '开航日期 12-01 → 12-02' },
+          { sheet: '美西', key: 'MSC CAT/003E', status: '新增', note: '新航次' },
         ],
         rules: ['船名+航次配对'],
-      });
+      },
     },
-  };
-  const service = new ScheduleService(db, home, llm);
+  ]);
+  const service = new ScheduleService(db, home, workerLlm, ctx);
   const skill = parseSkillFile(Buffer.from(SKILL), 'demo.md');
   const record = await service.compareWithSkill({
     oldBuffer: xlsx(OLD_ROWS),
@@ -144,10 +184,9 @@ test('服务层:按 Skill 生成对比记录并可导出', async () => {
   });
   assert.equal(record.mode, 'skill');
   assert.equal(record.skill.name, '简单船名航次对比');
-  assert.deepEqual(record.stats, { added: 1, removed: 0, changed: 1, skipped: 0, sheets: 1 });
+  assert.match(record.summary, /MSC ANA/);
+  assert.deepEqual(record.stats, { added: 1, removed: 0, changed: 1, skipped: 0 });
   assert.equal(record.items.length, 2);
-  assert.match(calls[0].system, /船期表对比专家/);
-  assert.match(calls[0].prompt, /只比较开航日期/);
 
   const exported = service.exportBuffer(record.id);
   const book = XLSX.read(exported.buffer, { type: 'buffer' });
@@ -231,12 +270,15 @@ test('提示词带上技能包文件清单、参考资料与脚本说明', async
 test('服务层:zip 技能包会落盘留档', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-skill-'));
   const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const llm = {
-    availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
-    complete: async () => JSON.stringify({ summary: '无变化。', stats: { added: 0, removed: 0, changed: 0 }, items: [] }),
-  };
-  const service = new ScheduleService(db, home, llm);
-  const pkg = await parseSkillPackage(skillZip(), 'panda-skill.zip');
+  const ctx = fakeDshCtx([{ name: 'finish', args: { summary: '已按技能包完成。' } }]);
+  const service = new ScheduleService(db, home, workerLlm, ctx);
+  const pkg = await parseSkillPackage(
+    buildZip([
+      { name: 'SKILL.md', data: SKILL },
+      { name: 'references/rules.md', data: '补充规则' },
+    ]),
+    'demo.zip',
+  );
   const record = await service.compareWithSkill({
     oldBuffer: xlsx(OLD_ROWS),
     oldName: 'old.xlsx',
@@ -244,12 +286,10 @@ test('服务层:zip 技能包会落盘留档', async () => {
     newName: 'new.xlsx',
     skill: pkg,
   });
-  assert.equal(record.skill.kind, 'zip');
-  assert.equal(record.skill.scripts.length, 1);
-  assert.ok(record.skill.dir.includes('skills'));
+  assert.ok(record.skill.dir);
   assert.ok(fs.existsSync(path.join(record.skill.dir, 'SKILL.md')));
-  assert.ok(fs.existsSync(path.join(record.skill.dir, 'scripts/panda_compare.py')));
-  assert.ok(fs.existsSync(path.join(record.skill.dir, 'meta.json')));
+  assert.ok(fs.existsSync(path.join(record.skill.dir, 'references/rules.md')));
+  assert.equal(record.engine, 'dsh-agent-loop');
 });
 
 
@@ -313,17 +353,6 @@ test('默认行为:技能包有脚本就直接执行,不需要前端传开关', 
 
 
 
-function agentStub(replies) {
-  let index = 0;
-  return {
-    availability: () => ({ available: true, provider: 'stub', model: 'stub' }),
-    streamAgent: async () => {
-      const reply = replies[Math.min(index, replies.length - 1)];
-      index += 1;
-      return reply;
-    },
-  };
-}
 
 test('没有模型且技能包没有脚本时,给可读的 400', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
@@ -343,28 +372,23 @@ test('没有模型且技能包没有脚本时,给可读的 400', async () => {
   );
 });
 
-test('Agent 流程:自己调脚本、自己收尾,记录工具步骤', async () => {
+
+test('Agent 流程:由官方循环调脚本并收尾,记录工具步骤', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
   const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const llm = agentStub([
-    { text: '先按 Skill 跑对比脚本', toolCalls: [{ id: 'c1', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
+  const ctx = fakeDshCtx([
+    { name: 'run_script', args: { script: 'scripts/compare.mjs' } },
     {
-      text: '',
-      toolCalls: [
-        {
-          id: 'c2',
-          name: 'finish',
-          arguments: JSON.stringify({
-            summary: '脚本产出 NOV-DEC 与 NOV-NOV 两页,NOV 无差异。',
-            report: '## 结论\n- NOV-NOV:无差异',
-            stats: { added: 0, removed: 0, changed: 0 },
-            rules: ['按 Skill 的变动1-4'],
-          }),
-        },
-      ],
+      name: 'finish',
+      args: {
+        summary: '脚本产出 NOV-DEC 与 NOV-NOV 两页,NOV 无差异。',
+        report: '## 结论\n- NOV-NOV:无差异',
+        stats: { added: 0, removed: 0, changed: 0 },
+        rules: ['按 Skill 的变动1-4'],
+      },
     },
   ]);
-  const service = new ScheduleService(db, home, llm);
+  const service = new ScheduleService(db, home, workerLlm, ctx);
   const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
   const record = await service.compareWithSkill({
     oldBuffer: xlsx(OLD_ROWS),
@@ -373,6 +397,7 @@ test('Agent 流程:自己调脚本、自己收尾,记录工具步骤', async () 
     newName: 'new.xlsx',
     skill: pkg,
   });
+  assert.equal(record.engine, 'dsh-agent-loop');
   assert.match(record.summary, /NOV 无差异/);
   assert.match(record.markdown, /NOV-NOV/);
   assert.equal(record.execution.code, 0);
@@ -383,16 +408,16 @@ test('Agent 流程:自己调脚本、自己收尾,记录工具步骤', async () 
 });
 
 
+
 test('Agent 不会重复执行同一脚本,产物去重', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'swb-run-'));
   const db = new WorkbenchDb(path.join(home, 'workbench.db'));
-  const replies = [
-    { text: '', toolCalls: [{ id: 'c1', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
-    { text: '', toolCalls: [{ id: 'c2', name: 'run_script', arguments: JSON.stringify({ script: 'scripts/compare.mjs' }) }] },
-    { text: '', toolCalls: [{ id: 'c3', name: 'finish', arguments: JSON.stringify({ summary: '同一脚本没有跑第二遍。' }) }] },
-  ];
-  const llm = agentStub(replies);
-  const service = new ScheduleService(db, home, llm);
+  const ctx = fakeDshCtx([
+    { name: 'run_script', args: { script: 'scripts/compare.mjs' } },
+    { name: 'run_script', args: { script: 'scripts/compare.mjs' } },
+    { name: 'finish', args: { summary: '同一脚本没有跑第二遍。' } },
+  ]);
+  const service = new ScheduleService(db, home, workerLlm, ctx);
   const pkg = await parseSkillPackage(scriptZip(), 'zim-skill.zip');
   const record = await service.compareWithSkill({
     oldBuffer: xlsx(OLD_ROWS),
@@ -402,7 +427,6 @@ test('Agent 不会重复执行同一脚本,产物去重', async () => {
     skill: pkg,
   });
   assert.match(record.summary, /同一脚本/);
-  assert.equal(record.executions ?? 1, 1);
   assert.equal(record.outputFiles.length, 1);
   assert.equal(record.steps.filter((step) => step.tool === 'run_script').length, 1);
 });

@@ -34,13 +34,14 @@ import {
   outputsToText,
 } from './skill-compare.js';
 import { detectEntryScript, runSkillScript } from './skill-runner.js';
-import { runSkillAgent } from './skill-agent.js';
+import { runSkillWithDshAgent } from './skill-agent-dsh.js';
 
 /** 船期表新旧对比:有船东配置走配置引擎,没有就走通用对比。 */
 export class ScheduleService {
-  constructor(db, home, llm = null) {
+  constructor(db, home, llm = null, ctx = null) {
     this.db = db;
     this.llm = llm;
+    this.ctx = ctx;
     this.dir = ensureDir(path.join(home, 'schedule', 'runs'));
     this.versionsDir = ensureDir(path.join(home, 'schedule', 'versions'));
     this.home = home;
@@ -270,12 +271,20 @@ export class ScheduleService {
     let modelUsed = null;
     let agentSteps = [];
     let outputFiles = [];
+    let parsed_engine = '';
     const availability = this.llm?.availability?.() ?? { available: false, reason: '当前 profile 没有挂载模型服务' };
 
-    if (availability.available && typeof this.llm?.streamAgent === 'function') {
-      modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
-      const agent = await runSkillAgent({
-        llm: this.llm,
+    if (availability.available) {
+      const selection = this.llm.selection?.() ?? { provider: '', model: '' };
+      modelUsed = { provider: selection.provider ?? '', model: selection.model ?? '' };
+      if (!this.ctx?.get?.('agentLoop')) {
+        throw new HttpError(400, '当前 profile 没有挂载 DSH agent 循环,无法按 Skill 执行对比');
+      }
+      // 循环、重试、中断、上下文、会话全部交给官方 agent 循环。
+      const agent = await runSkillWithDshAgent({
+        ctx: this.ctx,
+        provider: selection.provider,
+        model: selection.model,
         skill,
         skillDir,
         oldPath,
@@ -285,6 +294,7 @@ export class ScheduleService {
       });
       execution = agent.executions.at(-1) ?? null;
       agentSteps = agent.steps;
+      parsed_engine = agent.engine ?? '';
       const seen = new Set();
       outputFiles = agent.outputs.filter((file) => {
         if (seen.has(file.name)) return false;
@@ -298,26 +308,6 @@ export class ScheduleService {
         items: agent.items,
         rules: agent.rules,
       };
-    } else if (availability.available) {
-      // 老路径:模型不支持工具调用时,退回「一份提示词 + 两份表」。
-      modelUsed = { provider: availability.provider ?? '', model: availability.model ?? '' };
-      const oldSheets = readSheets(await workbookOf(oldBuffer, oldName));
-      const newSheets = readSheets(await workbookOf(newBuffer, newName));
-      if (oldSheets.length === 0 || newSheets.length === 0) throw new HttpError(400, '文件里没有可读的表格数据');
-      const built = buildSkillPrompt({
-        skill,
-        oldName,
-        newName,
-        oldWorkbook: oldSheets,
-        newWorkbook: newSheets,
-        carrierName: carrier?.name ?? carrierName,
-      });
-      const text = await this.llm.complete({ system: SKILL_SYSTEM_PROMPT, prompt: built.prompt, temperature: 0.2 });
-      parsed = parseSkillResult(text);
-      if (!parsed) throw new HttpError(502, '模型没有返回可用的对比结果,换个 Skill 或再试一次');
-      parsed.promptChars = built.prompt.length;
-      parsed.tableRows = built.rows;
-      parsed.truncated = built.truncated;
     } else {
       // 没有模型:只能执行技能脚本,否则无法按 Skill 对比。
       const entryScript = detectEntryScript(skill);
@@ -365,6 +355,7 @@ export class ScheduleService {
       // 脚本执行明细:退出码、stdout/stderr、产物文件(界面提供下载)。
       execution,
       steps: agentSteps,
+      engine: parsed_engine,
       outputFiles: outputFiles.map((file) => ({ name: file.name, size: file.size })),
       analysisSkipped: '',
       model: modelUsed,
